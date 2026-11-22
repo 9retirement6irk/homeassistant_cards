@@ -11,7 +11,7 @@
  *   custom:fragrance-inventory-card manage the todo lists: counts, ratings, used up
  */
 
-const VERSION = "0.5.1";
+const VERSION = "0.5.2";
 
 /* ------------------------------------------------------------------ helpers */
 
@@ -112,15 +112,18 @@ const stars = (v) => {
 function parseSuggestion(text) {
   const t = String(text || "").trim();
   if (!t || ["unknown", "unavailable"].includes(t)) return null;
-  const [head, ...rest] = t.split(/\s+[—–-]\s+/);
+  const [rawHead, ...rest] = t.split(/\s+[—–-]\s+/);
   const reason = rest.join(" — ").trim();
-  let m = /^Pura:\s*(?:slot\s*(\d)|swap(?:\s+in)?)\s+(.+?)(?:,\s*([a-z]+))?\s*(?:\((\d+)\))?$/i.exec(head.trim());
+  // The AI may put 🆕 anywhere in the head ("Pura: 🆕 swap in X", "Scentsy: 🆕X"); note it and take it out before matching.
+  const isNew = /🆕/u.test(rawHead);
+  const head = rawHead.replace(/🆕\s*/gu, "").replace(/\s{2,}/g, " ").trim();
+  let m = /^Pura:\s*(?:slot\s*(\d)|swap(?:\s+in)?)\s+(.+?)(?:,\s*([a-z]+))?\s*(?:\((\d+)\))?$/i.exec(head);
   if (m) {
-    return { kind: "pura", slot: m[1] ? Number(m[1]) : null, swap: !m[1], name: m[2].replace(/^🆕\s*/u, "").trim(), isNew: /🆕/u.test(m[2]),
+    return { kind: "pura", slot: m[1] ? Number(m[1]) : null, swap: !m[1], name: m[2].trim(), isNew,
       intensity: (m[3] || "").toLowerCase(), score: m[4], reason };
   }
-  m = /^Scentsy:\s*(.+?)\s*(?:\((\d+)\))?$/i.exec(head.trim());
-  if (m) return { kind: "scentsy", name: m[1].replace(/^🆕\s*/u, "").trim(), isNew: /🆕/u.test(m[1]), score: m[2], reason };
+  m = /^Scentsy:\s*(.+?)\s*(?:\((\d+)\))?$/i.exec(head);
+  if (m) return { kind: "scentsy", name: m[1].trim(), isNew, score: m[2], reason };
   return { kind: "text", name: head.trim(), reason };
 }
 
