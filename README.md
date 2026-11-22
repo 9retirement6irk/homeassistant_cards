@@ -153,6 +153,8 @@ Cards render inside `ha-card`, so a theme's card background, border and radius a
 
 Today's suggested scent for each room, from the same suggestion text as Room Fragrance. **Start** starts it (Pura slot and intensity, or Scentsy bar and warmers), **On now** shows when it's already running, and **Regenerate** presses your refresh button after a second tap. The gear in the header opens the settings listed under `tuning`: number sliders, on/off switches (automations, input booleans) and pickers.
 
+With `feedback_script` set, each pick gets a thumbs up and down. A tap runs that script with `scent`, `target_list`, `vote` (`up` or `down`) and `room`, so your suggestion logic can learn from it. The card remembers your vote in this browser so a pick isn't voted twice.
+
 ```yaml
 type: custom:fragrance-picks-card
 title: Whole home
@@ -171,6 +173,9 @@ tuning:                # shown behind the gear in the header
     icon: mdi:delete-sweep-outline
     color: orange
   - automation.scent_daily_suggestions
+feedback_script: script.scent_feedback   # adds 👍 / 👎 to each pick
+pura_list: todo.pura_pods                # which list a Pura pick's vote goes to
+scentsy_list: todo.scentsy_bars
 rooms:
   - name: Main Room
     icon: mdi:sofa
