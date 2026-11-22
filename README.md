@@ -63,6 +63,10 @@ scores_entity: input_text.scent_scores_main_room      # "Name 68 · Name 66 · .
 refresh_entity: input_button.refresh_scent_suggestions
 show_suggestion: true
 show_scores: true
+feedback_script: script.scent_feedback   # 👍 / 👎 on today's pick
+pura_list: todo.pura_pods                # ⭐ rates the pick on its list
+scentsy_list: todo.scentsy_bars
+room_name: Main Room                     # sent with votes; default comes from the suggestion entity
 
 # Pura (same options as Pura Mini)
 pura_device_id: 3db7f956aae6c0ffb4f238c432ad2e18
@@ -92,7 +96,7 @@ The suggestion is read from text like:
 - `Pura: slot 1 Simmered Cider, medium (68) — juicy apple, clove and bourbon…`
 - `Scentsy: Stargazing (65) — soft vanilla clouds…`
 
-**Start it** starts that Pura slot and sets the intensity, or picks that Scentsy bar and turns the warmers on.
+**Start it** starts that Pura slot and sets the intensity, or picks that Scentsy bar and turns the warmers on. With the lists set, the ⭐ button opens a 1–5 star rating for the pick, written to its `Stars:` line; Fragrance Picks has the same button.
 
 ## Stash and Inventory
 

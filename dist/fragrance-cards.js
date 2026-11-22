@@ -11,7 +11,7 @@
  *   custom:fragrance-inventory-card manage the todo lists: counts, ratings, used up
  */
 
-const VERSION = "0.4.1";
+const VERSION = "0.5.0";
 
 /* ------------------------------------------------------------------ helpers */
 
@@ -562,9 +562,179 @@ class PuraMiniCard extends PuraMixin(FcBase) {
   }
 }
 
+/* ------------------------------------------------------------------ todo-backed cards */
+
+const TodoMixin = (Base) =>
+  class extends Base {
+    connectedCallback() {
+      this._subscribe();
+    }
+
+    disconnectedCallback() {
+      for (const u of Object.values(this._subs || {})) Promise.resolve(u).then((f) => f && f()).catch(() => {});
+      this._subs = {};
+    }
+
+    set hass(hass) {
+      const first = !this._hass;
+      super.hass = hass;
+      if (first || !this._subs || !Object.keys(this._subs).length) this._subscribe();
+    }
+
+    get hass() {
+      return this._hass;
+    }
+
+    setConfig(config) {
+      super.setConfig(config);
+      this.disconnectedCallback();
+      this._subscribe();
+    }
+
+    _lists() {
+      const c = this._config;
+      const out = [];
+      if (c.pura_list) out.push({ id: "pura", entity: c.pura_list, name: c.pura_label || "Pura pods", unit: "pod", count_key: c.pura_count_key || "Pods", level_key: c.pura_level_key || "Pod level", c: color(c.pura_color, "var(--teal-color, #009688)") });
+      if (c.scentsy_list) out.push({ id: "scentsy", entity: c.scentsy_list, name: c.scentsy_label || "Scentsy bars", unit: "bar", count_key: c.scentsy_count_key || "Bars", level_key: c.scentsy_level_key || "", c: color(c.scentsy_color, "var(--purple-color, #926bc7)") });
+      return out;
+    }
+
+    _subscribe() {
+      if (!this._hass?.connection || !this._config || !this.isConnected) return;
+      this._subs ||= {};
+      this._items ||= {};
+      for (const l of this._lists()) {
+        if (this._subs[l.entity]) continue;
+        this._subs[l.entity] = this._hass.connection
+          .subscribeMessage((msg) => {
+            this._items[l.entity] = msg.items || [];
+            this._render(true);
+          }, { type: "todo/item/subscribe", entity_id: l.entity })
+          .catch((err) => {
+            delete this._subs[l.entity];
+            this._error = err?.message || String(err);
+            this._render(true);
+          });
+      }
+    }
+
+    /** Items still in stock, parsed. */
+    _stock(l) {
+      return (this._items?.[l.entity] || [])
+        .filter((i) => i.status === "needs_action")
+        .map((i) => {
+          const f = parseDesc(i.description);
+          const count = num(f[l.count_key], 1);
+          const level = l.level_key && f[l.level_key] ? num(f[l.level_key], 100) : 100;
+          const others = Object.entries(f).filter(([k, v]) => k !== l.count_key && /^(car refills|bricks|refills)$/i.test(k) && num(v) > 0).map(([k, v]) => `${num(v)} ${num(v) === 1 ? k.toLowerCase().replace(/s$/, "") : k.toLowerCase()}`);
+          return { uid: i.uid, name: i.summary, desc: i.description || "", f, count, level, others, brand: f.Brand || "", family: f.Category || "Other", stars: stars(f.Stars), lastUsed: f["Last used"] || "", list: l };
+        });
+    }
+
+    _remaining(it) {
+      return it.count <= 0 ? 0 : it.count - 1 + it.level / 100;
+    }
+  };
+
+/* ------------------------------------------------------------------ pick feedback (thumbs + stars) */
+
+/** Thumbs up/down and a star rating for a suggested scent. Needs pura_list / scentsy_list for stars, feedback_script for thumbs. */
+const PickFeedbackMixin = (Base) =>
+  class extends TodoMixin(Base) {
+    _voteKey(room, scent) {
+      return `fc-vote:${room}:${scent}`.toLowerCase();
+    }
+
+    _vote(room, scent) {
+      try {
+        return localStorage.getItem(this._voteKey(room, scent)) || (this._votes || {})[this._voteKey(room, scent)] || "";
+      } catch (e) {
+        return (this._votes || {})[this._voteKey(room, scent)] || "";
+      }
+    }
+
+    _pickList(s) {
+      return s.kind === "pura" ? this._config.pura_list : s.kind === "scentsy" ? this._config.scentsy_list : "";
+    }
+
+    _pickItem(s) {
+      const list = this._pickList(s);
+      const want = s.name.trim().toLowerCase();
+      return (this._items?.[list] || []).find((i) => String(i.summary || "").trim().toLowerCase() === want);
+    }
+
+    _feedbackHtml(room, s, k) {
+      const c = this._config;
+      if (!s || !s.kind || s.kind === "text") return "";
+      const sz = "width:32px;height:32px;min-width:32px;padding:0;--mdc-icon-size:17px";
+      const vote = this._vote(room, s.name);
+      const thumbs = c.feedback_script
+        ? `<button class="btn round small${vote === "up" ? " on" : ""}" style="--c:var(--green-color,#4caf50);${sz}" data-a="vote" data-v="up" data-k="${esc(k)}" aria-pressed="${vote === "up"}" aria-label="More like ${esc(s.name)} in the ${esc(room)}"><ha-icon icon="mdi:thumb-up${vote === "up" ? "" : "-outline"}"></ha-icon></button>
+           <button class="btn round small${vote === "down" ? " on" : ""}" style="--c:var(--red-color,#f44336);${sz}" data-a="vote" data-v="down" data-k="${esc(k)}" aria-pressed="${vote === "down"}" aria-label="Less ${esc(s.name)} in the ${esc(room)}"><ha-icon icon="mdi:thumb-down${vote === "down" ? "" : "-outline"}"></ha-icon></button>`
+        : "";
+      const item = this._pickList(s) ? this._pickItem(s) : null;
+      const rated = item ? stars(parseDesc(item.description).Stars) : 0;
+      const open = this._rateOpen === k;
+      const star = item
+        ? `<button class="btn round small${open ? " on" : ""}" style="--c:var(--amber-color,#ffc107);${sz}" data-a="rate-open" data-k="${esc(k)}" aria-expanded="${open}" aria-label="Rate ${esc(s.name)}${rated ? `, rated ${rated} of 5` : ""}"><ha-icon icon="mdi:star${rated ? "" : "-outline"}"></ha-icon></button>`
+        : "";
+      return thumbs || star ? `<span class="row" style="margin-left:auto;gap:6px;flex-wrap:nowrap">${thumbs}${star}</span>` : "";
+    }
+
+    _rateHtml(s, k) {
+      if (this._rateOpen !== k || !s) return "";
+      const item = this._pickItem(s);
+      if (!item) return "";
+      const rated = stars(parseDesc(item.description).Stars);
+      return `<div class="well row" style="padding:6px 10px;flex-wrap:nowrap" role="group" aria-label="Rate ${esc(s.name)}">
+        <span style="flex:1;font-size:13px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Rate ${esc(s.name)}</span>
+        <span style="white-space:nowrap">${[1, 2, 3, 4, 5].map((n) => `<button class="starbtn${n <= rated ? " on" : ""}" style="font-size:24px" data-a="rate" data-k="${esc(k)}" data-n="${n}" aria-label="${n} of 5">★</button>`).join("")}</span>
+      </div>`;
+    }
+
+    /** Handle vote / rate-open / rate for the pick identified by room + parsed suggestion. Returns true when handled. */
+    _feedbackAction(a, el, room, s) {
+      const c = this._config;
+      if (!s) return false;
+      const k = el.dataset.k;
+      if (a === "rate-open") {
+        this._rateOpen = this._rateOpen === k ? "" : k;
+        this._render(true);
+        return true;
+      }
+      if (a === "rate") {
+        const item = this._pickItem(s);
+        if (!item) return true;
+        const n = Number(el.dataset.n);
+        this._rateOpen = "";
+        this._toast(`Rated ${s.name} ${n} of 5`);
+        this._hass.callService("todo", "update_item", { item: item.uid, description: setFields(item.description, { Stars: `${n}/5` }) }, { entity_id: this._pickList(s) })
+          .catch((err) => this._toast(err?.message || String(err)));
+        this._render(true);
+        return true;
+      }
+      if (a === "vote") {
+        const v = el.dataset.v;
+        if (!c.feedback_script) return true;
+        const key = this._voteKey(room, s.name);
+        if (this._vote(room, s.name) === v) {
+          this._toast("Already noted");
+          return true;
+        }
+        (this._votes ||= {})[key] = v;
+        try { localStorage.setItem(key, v); } catch (e) { /* this page only */ }
+        this._toast(v === "up" ? `Noted: more ${s.name} in the ${room}` : `Noted: less ${s.name} in the ${room}`);
+        this._call("script", "turn_on", { entity_id: c.feedback_script, variables: { scent: s.name, target_list: this._pickList(s), vote: v, room } });
+        this._render(true);
+        return true;
+      }
+      return false;
+    }
+  };
+
 /* ------------------------------------------------------------------ Room Fragrance */
 
-class RoomFragranceCard extends PuraMixin(FcBase) {
+class RoomFragranceCard extends PickFeedbackMixin(PuraMixin(FcBase)) {
   static defaults() {
     return { show_suggestion: true, show_scores: true, show_pura: true, show_scentsy: true, show_intensity: true, show_auto_alternate: true, show_nightlight: true, show_power: true, show_pod_images: true, compact_when_off: true, low_threshold: 20, gloss: true, warmers: [], entities: [] };
   }
@@ -588,6 +758,12 @@ class RoomFragranceCard extends PuraMixin(FcBase) {
           { type: "grid", name: "", schema: [
             { name: "show_suggestion", selector: { boolean: {} } },
             { name: "show_scores", selector: { boolean: {} } },
+          ] },
+          { name: "feedback_script", selector: { entity: { domain: ["script"] } } },
+          { type: "grid", name: "", schema: [
+            { name: "room_name", selector: { text: {} } },
+            { name: "pura_list", selector: { entity: { domain: ["todo"] } } },
+            { name: "scentsy_list", selector: { entity: { domain: ["todo"] } } },
           ] },
         ] },
         { type: "expandable", name: "", title: "Pura", flatten: true, schema: [
@@ -653,9 +829,10 @@ class RoomFragranceCard extends PuraMixin(FcBase) {
             state: `<span style="color:var(--primary-text-color)">${headline}.</span> ${esc(s.reason)}${next ? `<br>Next: ${esc(next)}` : ""}`,
             iconAction: "more-info", iconData: `data-entity="${c.suggestion_entity}"` })}
           <div class="body"><div class="row" style="padding-left:46px">
-            ${canStart ? `<button class="btn on" style="--c:var(--amber-color,#ffc107)" data-a="start-pick">Start it</button>` : ""}
+            ${canStart ? `<button class="btn on" style="--c:var(--amber-color,#ffc107)" data-a="start-pick">Start it</button>` : s.kind === "pura" && s.swap ? `<span class="tag" style="--c:var(--teal-color,#009688)">Load the pod to start</span>` : ""}
             ${c.refresh_entity ? `<button class="btn round" aria-label="Refresh suggestions" data-a="toggle" data-entity="${c.refresh_entity}"><ha-icon icon="mdi:refresh"></ha-icon></button>` : ""}
-          </div></div></ha-card>`);
+            ${this._feedbackHtml(this._roomName(), s, "pick")}
+          </div>${this._rateHtml(s, "pick")}</div></ha-card>`);
       }
     }
 
@@ -703,8 +880,19 @@ class RoomFragranceCard extends PuraMixin(FcBase) {
     return `<ha-card>${this._tile({ icon, name: cfg.name || friendly(h, cfg.entity), state, c, off: toggleable && !on, iconAction: toggleable ? "toggle" : "more-info", iconData: `data-entity="${cfg.entity}"`, trailing })}</ha-card>`;
   }
 
+  _roomName() {
+    const c = this._config;
+    if (c.room_name) return c.room_name;
+    const id = String(c.suggestion_entity || "").split(".")[1] || "";
+    return titleCase(id.includes("suggestion_") ? id.split("suggestion_").pop() : id) || c.title || "Room";
+  }
+
   _action(a, el) {
     const c = this._config;
+    if (["vote", "rate-open", "rate"].includes(a)) {
+      this._feedbackAction(a, el, this._roomName(), parseSuggestion(this._hass.states[c.suggestion_entity]?.state));
+      return undefined;
+    }
     if (a === "more-info") return this._moreInfo(el.dataset.entity);
     if (a === "toggle") return this._toggle(el.dataset.entity);
     if (a === "scentsy-select") return this._call(c.scentsy_entity.split(".")[0], "select_option", { entity_id: c.scentsy_entity, option: el.value });
@@ -745,7 +933,7 @@ const ago = (iso) => {
   return "";
 };
 
-class FragrancePicksCard extends FcBase {
+class FragrancePicksCard extends PickFeedbackMixin(FcBase) {
   static defaults() {
     return { title: "Whole home", icon: "mdi:home-heart", show_updated: true, show_reason: true, show_scores: true, show_start: true, max_scores: 4, gloss: true, rooms: [], tuning: [], feedback_script: "", pura_list: "todo.pura_pods", scentsy_list: "todo.scentsy_bars" };
   }
@@ -804,7 +992,7 @@ class FragrancePicksCard extends FcBase {
   }
 
   _localKey() {
-    return [this._arm, this._tuning, JSON.stringify(this._open || {}), Math.floor(Date.now() / 60000)].join("#");
+    return [this._arm, this._tuning, this._rateOpen, JSON.stringify(this._open || {}), Math.floor(Date.now() / 60000)].join("#");
   }
 
   _html() {
@@ -847,13 +1035,7 @@ class FragrancePicksCard extends FcBase {
         ? scores.split("·").map((x) => x.trim()).filter((x) => x && !x.toLowerCase().startsWith(s.name.toLowerCase())).slice(0, Number(c.max_scores ?? 4))
         : [];
       const open = this._open?.[i];
-      const vote = this._vote(r.name, s.name);
-      const thumbs = c.feedback_script && s.kind
-        ? `<span class="row" style="margin-left:auto;gap:6px;flex-wrap:nowrap">
-            <button class="btn round small${vote === "up" ? " on" : ""}" style="--c:var(--green-color,#4caf50);width:32px;height:32px;min-width:32px;padding:0;--mdc-icon-size:17px" data-a="vote" data-v="up" data-i="${i}" aria-pressed="${vote === "up"}" aria-label="More like ${esc(s.name)}"><ha-icon icon="mdi:thumb-up${vote === "up" ? "" : "-outline"}"></ha-icon></button>
-            <button class="btn round small${vote === "down" ? " on" : ""}" style="--c:var(--red-color,#f44336);width:32px;height:32px;min-width:32px;padding:0;--mdc-icon-size:17px" data-a="vote" data-v="down" data-i="${i}" aria-pressed="${vote === "down"}" aria-label="Fewer like ${esc(s.name)}"><ha-icon icon="mdi:thumb-down${vote === "down" ? "" : "-outline"}"></ha-icon></button>
-          </span>`
-        : "";
+      const thumbs = this._feedbackHtml(r.name, s, String(i));
       return `<div class="well roomrow">
         <div class="head">
           <button class="ticon" style="--c:var(--amber-color,#ffc107)" data-a="nav" data-i="${i}" aria-label="${esc(r.name)}"><ha-icon icon="${esc(icon)}"></ha-icon></button>
@@ -862,6 +1044,7 @@ class FragrancePicksCard extends FcBase {
           ${start}
         </div>
         <div class="chips" style="align-items:center">${tagText ? `<span class="tag" style="--c:${tagC}">${esc(tagText)}</span>` : ""}${s.isNew ? `<span class="tag" style="--c:var(--green-color,#4caf50)">New to you</span>` : ""}${thumbs}</div>
+        ${this._rateHtml(s, String(i))}
         ${c.show_reason !== false && s.reason ? `<span class="reason${open ? " open" : ""}" data-a="expand" data-i="${i}" role="button" tabindex="0" aria-expanded="${!!open}">${esc(s.reason)}</span>` : ""}
         ${others.length ? `<div class="chips">${others.map((o) => `<span class="tag">${esc(o)}</span>`).join("")}</div>` : ""}
       </div>`;
@@ -906,38 +1089,13 @@ class FragrancePicksCard extends FcBase {
       <button class="btn small${on ? " on" : ""}" style="--c:${c}" role="switch" aria-checked="${on}" aria-label="${esc(name)}" data-a="toggle" data-entity="${esc(t.entity)}">${on ? "On" : "Off"}</button></div>`;
   }
 
-  _voteKey(room, scent) {
-    return `fc-vote:${room}:${scent}`.toLowerCase();
-  }
-
-  _vote(room, scent) {
-    try {
-      return localStorage.getItem(this._voteKey(room, scent)) || "";
-    } catch (e) {
-      return (this._votes || {})[this._voteKey(room, scent)] || "";
-    }
-  }
-
-  _sendVote(r, v) {
-    const c = this._config;
-    const s = parseSuggestion(this._hass.states[r.suggestion_entity]?.state);
-    if (!s || !c.feedback_script) return undefined;
-    const key = this._voteKey(r.name, s.name);
-    if (this._vote(r.name, s.name) === v) return this._toast("Already noted");
-    (this._votes ||= {})[key] = v;
-    try { localStorage.setItem(key, v); } catch (e) { /* per-browser memory only */ }
-    this._toast(v === "up" ? `Noted: more like ${s.name}` : `Noted: less ${s.name} in the ${r.name}`);
-    this._call("script", "turn_on", {
-      entity_id: c.feedback_script,
-      variables: { scent: s.name, target_list: s.kind === "pura" ? c.pura_list : c.scentsy_list, vote: v, room: r.name },
-    });
-    return this._render(true);
-  }
-
   _action(a, el) {
     const c = this._config;
-    const r = c.rooms?.[Number(el.dataset.i)];
-    if (a === "vote" && r) return this._sendVote(r, el.dataset.v);
+    const r = c.rooms?.[Number(el.dataset.i ?? el.dataset.k)];
+    if (["vote", "rate-open", "rate"].includes(a) && r) {
+      this._feedbackAction(a, el, r.name, parseSuggestion(this._hass.states[r.suggestion_entity]?.state));
+      return undefined;
+    }
     if (a === "tuning") { this._tuning = !this._tuning; return this._render(true); }
     if (a === "toggle") return this._toggle(el.dataset.entity);
     if (a === "tune-set") return this._call(el.dataset.entity.split(".")[0], "set_value", { entity_id: el.dataset.entity, value: Number(el.value) });
@@ -1072,80 +1230,6 @@ class FragranceLoadedCard extends FcBase {
     return undefined;
   }
 }
-
-/* ------------------------------------------------------------------ todo-backed cards */
-
-const TodoMixin = (Base) =>
-  class extends Base {
-    connectedCallback() {
-      this._subscribe();
-    }
-
-    disconnectedCallback() {
-      for (const u of Object.values(this._subs || {})) Promise.resolve(u).then((f) => f && f()).catch(() => {});
-      this._subs = {};
-    }
-
-    set hass(hass) {
-      const first = !this._hass;
-      super.hass = hass;
-      if (first || !this._subs || !Object.keys(this._subs).length) this._subscribe();
-    }
-
-    get hass() {
-      return this._hass;
-    }
-
-    setConfig(config) {
-      super.setConfig(config);
-      this.disconnectedCallback();
-      this._subscribe();
-    }
-
-    _lists() {
-      const c = this._config;
-      const out = [];
-      if (c.pura_list) out.push({ id: "pura", entity: c.pura_list, name: c.pura_label || "Pura pods", unit: "pod", count_key: c.pura_count_key || "Pods", level_key: c.pura_level_key || "Pod level", c: color(c.pura_color, "var(--teal-color, #009688)") });
-      if (c.scentsy_list) out.push({ id: "scentsy", entity: c.scentsy_list, name: c.scentsy_label || "Scentsy bars", unit: "bar", count_key: c.scentsy_count_key || "Bars", level_key: c.scentsy_level_key || "", c: color(c.scentsy_color, "var(--purple-color, #926bc7)") });
-      return out;
-    }
-
-    _subscribe() {
-      if (!this._hass?.connection || !this._config || !this.isConnected) return;
-      this._subs ||= {};
-      this._items ||= {};
-      for (const l of this._lists()) {
-        if (this._subs[l.entity]) continue;
-        this._subs[l.entity] = this._hass.connection
-          .subscribeMessage((msg) => {
-            this._items[l.entity] = msg.items || [];
-            this._render(true);
-          }, { type: "todo/item/subscribe", entity_id: l.entity })
-          .catch((err) => {
-            delete this._subs[l.entity];
-            this._error = err?.message || String(err);
-            this._render(true);
-          });
-      }
-    }
-
-    /** Items still in stock, parsed. */
-    _stock(l) {
-      return (this._items?.[l.entity] || [])
-        .filter((i) => i.status === "needs_action")
-        .map((i) => {
-          const f = parseDesc(i.description);
-          const count = num(f[l.count_key], 1);
-          const level = l.level_key && f[l.level_key] ? num(f[l.level_key], 100) : 100;
-          const others = Object.entries(f).filter(([k, v]) => k !== l.count_key && /^(car refills|bricks|refills)$/i.test(k) && num(v) > 0).map(([k, v]) => `${num(v)} ${num(v) === 1 ? k.toLowerCase().replace(/s$/, "") : k.toLowerCase()}`);
-          return { uid: i.uid, name: i.summary, desc: i.description || "", f, count, level, others, brand: f.Brand || "", family: f.Category || "Other", stars: stars(f.Stars), lastUsed: f["Last used"] || "", list: l };
-        });
-    }
-
-    _remaining(it) {
-      return it.count <= 0 ? 0 : it.count - 1 + it.level / 100;
-    }
-  };
 
 /* ------------------------------------------------------------------ Stash */
 
@@ -1452,7 +1536,7 @@ const LABELS = {
   show_totals: "Totals", show_families: "Families", show_low: "Running low", max_low: "Running low rows", show_search: "Search",
   show_add: "Add button", sort: "Sort", max_items: "Rows shown",
   summary_entity: "Whole-home summary", rooms: "Rooms", show_updated: "Updated time", show_reason: "Why", show_start: "Start buttons",
-  max_scores: "Runner-ups shown", tuning: "Settings behind the gear", feedback_script: "Feedback script", pura_list: "Pura list", scentsy_list: "Scentsy list", critical_threshold: "Red below", show_header: "Header",
+  max_scores: "Runner-ups shown", tuning: "Settings behind the gear", feedback_script: "Feedback script", pura_list: "Pura list", scentsy_list: "Scentsy list", room_name: "Room name", critical_threshold: "Red below", show_header: "Header",
 };
 
 const HELPERS = {
@@ -1466,6 +1550,7 @@ const HELPERS = {
   refresh_entity: "Pressed by Regenerate (tap twice to confirm).",
   rooms: "Each room: its suggestion, Pura diffuser and Scentsy picker.",
   tuning: "Sliders, switches or pickers that tune the suggestions; the gear in the header shows them.",
+  room_name: "Sent with thumbs votes. Default: taken from the suggestion entity (…_main_room → Main Room).",
   feedback_script: "Shows thumbs up/down on each pick and runs this script with scent, target_list, vote (up/down) and room.",
 };
 
