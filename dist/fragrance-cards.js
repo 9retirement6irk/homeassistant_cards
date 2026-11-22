@@ -11,7 +11,7 @@
  *   custom:fragrance-inventory-card manage the todo lists: counts, ratings, used up
  */
 
-const VERSION = "0.2.0";
+const VERSION = "0.3.0";
 
 /* ------------------------------------------------------------------ helpers */
 
@@ -734,7 +734,7 @@ const ago = (iso) => {
 
 class FragrancePicksCard extends FcBase {
   static defaults() {
-    return { title: "Whole home", icon: "mdi:home-heart", show_updated: true, show_reason: true, show_scores: true, show_start: true, max_scores: 4, gloss: true, rooms: [] };
+    return { title: "Whole home", icon: "mdi:home-heart", show_updated: true, show_reason: true, show_scores: true, show_start: true, max_scores: 4, gloss: true, rooms: [], tuning: [] };
   }
 
   static getStubConfig() {
@@ -751,6 +751,7 @@ class FragrancePicksCard extends FcBase {
         { name: "summary_entity", selector: { entity: { domain: ["input_text", "sensor", "text"] } } },
         { name: "refresh_entity", selector: { entity: { domain: ["input_button", "button", "script", "automation"] } } },
         { name: "rooms", selector: { object: { multiple: true, label_field: "name", description_field: "suggestion_entity", fields: ROOM_FIELDS } } },
+        { name: "tuning", selector: { entity: { multiple: true, domain: ["input_number", "number", "input_boolean", "automation", "switch", "input_select", "select"] } } },
         { type: "expandable", name: "", title: "Show", flatten: true, schema: [
           { type: "grid", name: "", schema: [
             { name: "show_updated", selector: { boolean: {} } },
@@ -773,7 +774,7 @@ class FragrancePicksCard extends FcBase {
 
   _watch() {
     const c = this._config;
-    const ids = [c.summary_entity];
+    const ids = [c.summary_entity, ...(c.tuning || []).map((t) => (typeof t === "string" ? t : t.entity))];
     for (const r of c.rooms || []) {
       ids.push(r.suggestion_entity, r.scores_entity, r.scentsy_entity);
       const p = findPura(this._hass, r.pura_device_id);
@@ -783,7 +784,7 @@ class FragrancePicksCard extends FcBase {
   }
 
   _localKey() {
-    return [this._arm, JSON.stringify(this._open || {}), Math.floor(Date.now() / 60000)].join("#");
+    return [this._arm, this._tuning, JSON.stringify(this._open || {}), Math.floor(Date.now() / 60000)].join("#");
   }
 
   _html() {
@@ -837,17 +838,52 @@ class FragrancePicksCard extends FcBase {
       </div>`;
     }).join("");
 
+    const tuning = (c.tuning || []).map((t) => (typeof t === "string" ? { entity: t } : t)).filter((t) => t.entity);
+    const gear = tuning.length
+      ? `<button class="btn round${this._tuning ? " on" : ""}" style="--c:var(--deep-orange-color,#ff6f22)" data-a="tuning" aria-label="Suggestion settings" aria-expanded="${!!this._tuning}"><ha-icon icon="mdi:cog"></ha-icon></button>`
+      : "";
+    const panel = this._tuning && tuning.length ? `<div class="well" style="padding:4px 12px 8px;display:flex;flex-direction:column;gap:2px">${tuning.map((t) => this._tuningRow(t)).join("")}</div>` : "";
     return `<ha-card>
-      ${this._tile({ icon: c.icon, name: c.title, c: "var(--deep-orange-color,#ff6f22)", state: summary, wrapState: true, iconAction: "more-info", iconData: `data-entity="${c.summary_entity || ""}"` })}
+      ${this._tile({ icon: c.icon, name: c.title, c: "var(--deep-orange-color,#ff6f22)", state: summary, wrapState: true, iconAction: "more-info", iconData: `data-entity="${c.summary_entity || ""}"`, trailing: gear })}
       <div class="body">
+        ${panel}
         ${updated || regen ? `<div class="row" style="justify-content:space-between;padding-left:46px">${updated}${regen}</div>` : ""}
         ${rows}
       </div></ha-card>`;
   }
 
+  _tuningRow(t) {
+    const h = this._hass;
+    const st = h.states[t.entity];
+    const domain = t.entity.split(".")[0];
+    const name = t.name || friendly(h, t.entity);
+    const icon = t.icon || st?.attributes?.icon || "mdi:tune-variant";
+    if (!st) return `<div class="muted" style="padding:6px 0">${esc(t.entity)} not found</div>`;
+    if (domain === "input_number" || domain === "number") {
+      const a = st.attributes;
+      const unit = a.unit_of_measurement ? `${a.unit_of_measurement === "%" ? "" : " "}${a.unit_of_measurement}` : "";
+      const c = color(t.color, "var(--deep-orange-color,#ff6f22)");
+      return `<div class="slider" style="padding:6px 0 0"><label for="tn-${esc(t.entity)}"><span><ha-icon icon="${esc(icon)}" style="--mdc-icon-size:16px;vertical-align:-3px;color:${c}"></ha-icon> ${esc(name)}</span><b>${esc(num(st.state))}${esc(unit)}</b></label>
+        <input id="tn-${esc(t.entity)}" type="range" style="--c:${c}" min="${a.min ?? 0}" max="${a.max ?? 100}" step="${a.step ?? 1}" value="${num(st.state)}" data-a="tune-set" data-entity="${esc(t.entity)}"></div>`;
+    }
+    if (domain === "input_select" || domain === "select") {
+      const opts = (st.attributes.options || []).map((o) => `<option ${o === st.state ? "selected" : ""}>${esc(o)}</option>`).join("");
+      return `<div class="row" style="padding:6px 0;flex-wrap:nowrap"><ha-icon icon="${esc(icon)}" style="--mdc-icon-size:16px"></ha-icon><span style="flex:1;font-size:13px">${esc(name)}</span>
+        <select class="well select" data-a="tune-select" data-entity="${esc(t.entity)}" aria-label="${esc(name)}">${opts}</select></div>`;
+    }
+    const on = st.state === "on";
+    const c = color(t.color, "var(--green-color,#4caf50)");
+    return `<div class="row" style="padding:6px 0;flex-wrap:nowrap"><ha-icon icon="${esc(icon)}" style="--mdc-icon-size:16px;color:${on ? c : "var(--secondary-text-color)"}"></ha-icon><span style="flex:1;font-size:13px">${esc(name)}</span>
+      <button class="btn small${on ? " on" : ""}" style="--c:${c}" role="switch" aria-checked="${on}" aria-label="${esc(name)}" data-a="toggle" data-entity="${esc(t.entity)}">${on ? "On" : "Off"}</button></div>`;
+  }
+
   _action(a, el) {
     const c = this._config;
     const r = c.rooms?.[Number(el.dataset.i)];
+    if (a === "tuning") { this._tuning = !this._tuning; return this._render(true); }
+    if (a === "toggle") return this._toggle(el.dataset.entity);
+    if (a === "tune-set") return this._call(el.dataset.entity.split(".")[0], "set_value", { entity_id: el.dataset.entity, value: Number(el.value) });
+    if (a === "tune-select") return this._call(el.dataset.entity.split(".")[0], "select_option", { entity_id: el.dataset.entity, option: el.value });
     if (a === "more-info") return this._moreInfo(el.dataset.entity);
     if (a === "refresh") {
       if (this._armed("refresh")) {
@@ -1358,7 +1394,7 @@ const LABELS = {
   show_totals: "Totals", show_families: "Families", show_low: "Running low", max_low: "Running low rows", show_search: "Search",
   show_add: "Add button", sort: "Sort", max_items: "Rows shown",
   summary_entity: "Whole-home summary", rooms: "Rooms", show_updated: "Updated time", show_reason: "Why", show_start: "Start buttons",
-  max_scores: "Runner-ups shown", critical_threshold: "Red below", show_header: "Header",
+  max_scores: "Runner-ups shown", tuning: "Settings behind the gear", critical_threshold: "Red below", show_header: "Header",
 };
 
 const HELPERS = {
@@ -1371,6 +1407,7 @@ const HELPERS = {
   entities: "Shown as tiles under the card, with a brightness slider for dimmable lights.",
   refresh_entity: "Pressed by Regenerate (tap twice to confirm).",
   rooms: "Each room: its suggestion, Pura diffuser and Scentsy picker.",
+  tuning: "Sliders, switches or pickers that tune the suggestions; the gear in the header shows them.",
 };
 
 /* ------------------------------------------------------------------ register */

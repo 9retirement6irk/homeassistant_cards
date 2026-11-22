@@ -151,7 +151,7 @@ Cards render inside `ha-card`, so a theme's card background, border and radius a
 
 ## Fragrance Picks
 
-Today's suggested scent for each room, from the same suggestion text as Room Fragrance. **Start** starts it (Pura slot and intensity, or Scentsy bar and warmers), **On now** shows when it's already running, and **Regenerate** presses your refresh button after a second tap.
+Today's suggested scent for each room, from the same suggestion text as Room Fragrance. **Start** starts it (Pura slot and intensity, or Scentsy bar and warmers), **On now** shows when it's already running, and **Regenerate** presses your refresh button after a second tap. The gear in the header opens the settings listed under `tuning`: number sliders, on/off switches (automations, input booleans) and pickers.
 
 ```yaml
 type: custom:fragrance-picks-card
@@ -164,6 +164,13 @@ show_reason: true      # tap the reason to expand it
 show_scores: true      # runner-ups as chips
 max_scores: 4
 show_start: true
+tuning:                # shown behind the gear in the header
+  - input_number.scent_exploration
+  - entity: input_number.scent_use_it_up
+    name: Use it up
+    icon: mdi:delete-sweep-outline
+    color: orange
+  - automation.scent_daily_suggestions
 rooms:
   - name: Main Room
     icon: mdi:sofa
