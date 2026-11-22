@@ -11,7 +11,7 @@
  *   custom:fragrance-inventory-card manage the todo lists: counts, ratings, used up
  */
 
-const VERSION = "0.5.0";
+const VERSION = "0.5.1";
 
 /* ------------------------------------------------------------------ helpers */
 
@@ -131,7 +131,7 @@ const STYLE = `
 .stack{display:flex;flex-direction:column;gap:var(--fc-gap)}
 ha-card{overflow:hidden}
 .tile{display:flex;align-items:center;gap:10px;padding:10px}
-.ticon{--c:var(--state-icon-color,#44739e);width:36px;height:36px;border-radius:50%;flex:none;display:flex;align-items:center;justify-content:center;
+.ticon{--c:var(--state-icon-color,#44739e);width:36px;height:36px;border-radius:var(--tile-icon-border-radius,var(--ha-tile-icon-border-radius,8px));flex:none;display:flex;align-items:center;justify-content:center;
   background:color-mix(in srgb,var(--c) 20%,transparent);color:var(--c);cursor:pointer;border:none;padding:0;position:relative}
 .ticon.off{--c:var(--state-inactive-color,var(--disabled-text-color,#9e9e9e))}
 .ticon ha-icon{--mdc-icon-size:22px}
