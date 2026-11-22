@@ -5,11 +5,13 @@
  * Four tile-style cards that pick up your theme (glass/gloss themes included):
  *   custom:pura-mini-card          one Pura diffuser: pods, intensity, toggles
  *   custom:room-fragrance-card     today's pick + Pura + Scentsy + extras for a room
+ *   custom:fragrance-picks-card    today's suggested scent per room
+ *   custom:fragrance-loaded-card   what's loaded in each room
  *   custom:fragrance-stash-card    what's on the shelf, from your todo lists
  *   custom:fragrance-inventory-card manage the todo lists: counts, ratings, used up
  */
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 
 /* ------------------------------------------------------------------ helpers */
 
@@ -193,6 +195,28 @@ select option{color:#000}
 .search{display:flex;align-items:center;gap:8px;padding:0 10px}
 .search input{flex:1;background:transparent;height:40px}
 .empty{padding:12px;text-align:center;color:var(--secondary-text-color);font-size:13px}
+.roomrow{padding:10px;display:flex;flex-direction:column;gap:6px}
+.roomrow .head{display:flex;align-items:center;gap:10px}
+.roomrow .ticon{width:32px;height:32px}
+.roomrow .ticon ha-icon{--mdc-icon-size:18px}
+.roomrow .title{display:flex;flex-direction:column;min-width:0;flex:1;cursor:pointer}
+.roomrow .room{font-size:12px;color:var(--secondary-text-color);line-height:16px}
+.roomrow .pick{font-size:15px;font-weight:600;line-height:20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tag{display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:600;line-height:18px;padding:0 7px;border-radius:9px;white-space:nowrap;
+  color:var(--c);background:color-mix(in srgb,var(--c) 18%,transparent);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--c) 35%,transparent)}
+.score{font-size:12px;font-weight:700;min-width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex:none;
+  color:var(--primary-text-color);background:radial-gradient(circle at 50% 30%,rgba(255,255,255,.25),rgba(255,255,255,0) 60%),color-mix(in srgb,var(--c) 45%,transparent);box-shadow:inset 0 1px 0 rgba(255,255,255,.3),0 1px 3px rgba(0,0,0,.4)}
+.reason{font-size:13px;line-height:18px;color:var(--secondary-text-color);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;cursor:pointer}
+.reason.open{display:block}
+.chips{display:flex;gap:4px;flex-wrap:wrap}
+.chips .tag{--c:var(--secondary-text-color);font-weight:500}
+.pods{display:grid;grid-template-columns:repeat(var(--n,2),minmax(0,1fr));gap:6px}
+.pod{display:flex;align-items:center;gap:8px;padding:6px 8px;min-width:0}
+.pod img,.pod svg{width:18px;height:34px;object-fit:contain;flex:none;filter:drop-shadow(0 1px 2px rgba(0,0,0,.45))}
+.pod .t{display:flex;flex-direction:column;gap:3px;min-width:0;flex:1}
+.pod .n{font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pod.on{box-shadow:inset 0 2px 5px rgba(0,0,0,.45),0 0 0 1.5px var(--c),0 0 8px color-mix(in srgb,var(--c) 55%,transparent)}
+.pod .level{height:4px}
 :host([flat]) .btn,:host([flat]) .btn.on{background-image:none;box-shadow:none}
 :host([flat]) .well{box-shadow:none;background:rgba(127,127,127,.12)}
 :host([flat]) input[type=range]::-webkit-slider-thumb{background:var(--c);box-shadow:none}
@@ -322,6 +346,42 @@ class FcBase extends HTMLElement {
   _action() {}
 
   _live() {}
+
+  /** Act on a parsed suggestion: start the Pura slot and intensity, or pick the Scentsy bar and warm it. */
+  async _startSuggestion(s, room) {
+    const h = this._hass;
+    if (!s || !room) return;
+    if (s.kind === "pura" && room.pura_device_id) {
+      const p = findPura(h, room.pura_device_id);
+      if (!p.fragrance) return;
+      await this._call("select", "select_option", { entity_id: p.fragrance, option: `slot_${s.slot}` });
+      const options = h.states[p.intensity]?.attributes?.options || [];
+      if (s.intensity && options.includes(s.intensity)) {
+        setTimeout(() => this._call("select", "select_option", { entity_id: p.intensity, option: s.intensity }), 1500);
+      }
+    } else if (s.kind === "scentsy" && room.scentsy_entity) {
+      const options = h.states[room.scentsy_entity]?.attributes?.options || [];
+      const option = options.find((o) => o.toLowerCase() === s.name.toLowerCase());
+      if (option) await this._call(room.scentsy_entity.split(".")[0], "select_option", { entity_id: room.scentsy_entity, option });
+      const warmers = (room.warmers || []).map((w) => (typeof w === "string" ? w : w.entity));
+      if (warmers.length) await this._call("homeassistant", "turn_on", { entity_id: warmers });
+    }
+  }
+
+  /** Two taps to confirm: the first arms the button, the second within 4 s runs it. */
+  _armed(key) {
+    if (this._arm === key) {
+      this._arm = "";
+      clearTimeout(this._armTimer);
+      this._render(true);
+      return true;
+    }
+    this._arm = key;
+    clearTimeout(this._armTimer);
+    this._armTimer = setTimeout(() => { this._arm = ""; this._render(true); }, 4000);
+    this._render(true);
+    return false;
+  }
 
   /** A tile header like the built-in tile card. */
   _tile({ icon, name, state, c, off, iconAction, iconData = "", trailing = "", wrapState = false }) {
@@ -643,25 +703,279 @@ class RoomFragranceCard extends PuraMixin(FcBase) {
     return this._puraAction(a, el);
   }
 
-  async _startPick() {
+  _startPick() {
+    const c = this._config;
+    return this._startSuggestion(parseSuggestion(this._hass.states[c.suggestion_entity]?.state), { pura_device_id: c.pura_device_id || c.device_id, scentsy_entity: c.scentsy_entity, warmers: c.warmers });
+  }
+}
+
+/* ------------------------------------------------------------------ Today's picks */
+
+const ROOM_FIELDS = {
+  name: { label: "Room name", required: true, selector: { text: {} } },
+  icon: { label: "Icon", selector: { icon: {} } },
+  suggestion_entity: { label: "Suggestion", selector: { entity: { domain: ["input_text", "sensor", "text"] } } },
+  scores_entity: { label: "Top scores", selector: { entity: { domain: ["input_text", "sensor", "text"] } } },
+  pura_device_id: { label: "Pura diffuser", selector: { device: { integration: "pura" } } },
+  scentsy_entity: { label: "Scentsy bar picker", selector: { entity: { domain: ["input_select", "select"] } } },
+  warmers: { label: "Warmers", selector: { entity: { multiple: true, domain: ["switch", "light", "input_boolean"] } } },
+  navigation_path: { label: "Tap opens", selector: { text: {} } },
+};
+
+const ago = (iso) => {
+  const t = Date.parse(iso || "");
+  if (!Number.isFinite(t)) return "";
+  const s = Math.max(0, (Date.now() - t) / 1000);
+  if (s < 60) return "just now";
+  const units = [["day", 86400], ["hour", 3600], ["minute", 60]];
+  for (const [u, n] of units) if (s >= n) { const v = Math.floor(s / n); return `${v} ${u}${v === 1 ? "" : "s"} ago`; }
+  return "";
+};
+
+class FragrancePicksCard extends FcBase {
+  static defaults() {
+    return { title: "Whole home", icon: "mdi:home-heart", show_updated: true, show_reason: true, show_scores: true, show_start: true, max_scores: 4, gloss: true, rooms: [] };
+  }
+
+  static getStubConfig() {
+    return { summary_entity: "input_text.scent_suggestion_whole_home", refresh_entity: "input_button.refresh_scent_suggestions", rooms: [] };
+  }
+
+  static getConfigForm() {
+    return {
+      schema: [
+        { type: "grid", name: "", schema: [
+          { name: "title", selector: { text: {} } },
+          { name: "icon", selector: { icon: {} } },
+        ] },
+        { name: "summary_entity", selector: { entity: { domain: ["input_text", "sensor", "text"] } } },
+        { name: "refresh_entity", selector: { entity: { domain: ["input_button", "button", "script", "automation"] } } },
+        { name: "rooms", selector: { object: { multiple: true, label_field: "name", description_field: "suggestion_entity", fields: ROOM_FIELDS } } },
+        { type: "expandable", name: "", title: "Show", flatten: true, schema: [
+          { type: "grid", name: "", schema: [
+            { name: "show_updated", selector: { boolean: {} } },
+            { name: "show_reason", selector: { boolean: {} } },
+            { name: "show_scores", selector: { boolean: {} } },
+            { name: "show_start", selector: { boolean: {} } },
+            { name: "gloss", selector: { boolean: {} } },
+            { name: "max_scores", selector: { number: { min: 0, max: 10, mode: "box" } } },
+          ] },
+        ] },
+      ],
+      computeLabel: (s) => LABELS[s.name] || titleCase(s.name),
+      computeHelper: (s) => HELPERS[s.name],
+    };
+  }
+
+  getCardSize() {
+    return 3 + 2 * (this._config?.rooms?.length || 0);
+  }
+
+  _watch() {
+    const c = this._config;
+    const ids = [c.summary_entity];
+    for (const r of c.rooms || []) {
+      ids.push(r.suggestion_entity, r.scores_entity, r.scentsy_entity);
+      const p = findPura(this._hass, r.pura_device_id);
+      ids.push(p.fragrance);
+    }
+    return ids;
+  }
+
+  _localKey() {
+    return [this._arm, JSON.stringify(this._open || {}), Math.floor(Date.now() / 60000)].join("#");
+  }
+
+  _html() {
     const c = this._config;
     const h = this._hass;
-    const s = parseSuggestion(h.states[c.suggestion_entity]?.state);
-    if (!s) return;
-    if (s.kind === "pura") {
-      const p = this._pura();
-      await this._call("select", "select_option", { entity_id: p.fragrance, option: `slot_${s.slot}` });
-      const options = h.states[p.intensity]?.attributes?.options || [];
-      if (s.intensity && options.includes(s.intensity)) {
-        setTimeout(() => this._call("select", "select_option", { entity_id: p.intensity, option: s.intensity }), 1500);
+    const sum = c.summary_entity ? h.states[c.summary_entity] : null;
+    const armed = this._arm === "refresh";
+    const regen = c.refresh_entity
+      ? `<button class="btn${armed ? " on" : ""}" style="--c:var(--amber-color,#ffc107)" data-a="refresh" aria-label="Regenerate suggestions"><ha-icon icon="mdi:refresh"></ha-icon>${armed ? "Tap again" : "Regenerate"}</button>`
+      : "";
+    const summary = sum && !["unknown", "unavailable", ""].includes(sum.state) ? esc(sum.state) : "No suggestions yet";
+    const updated = c.show_updated !== false && sum ? `<span class="muted"><ha-icon icon="mdi:clock-outline" style="--mdc-icon-size:14px;vertical-align:-2px"></ha-icon> Updated ${esc(ago(sum.last_changed))}</span>` : "";
+
+    const rows = (c.rooms || []).map((r, i) => {
+      const s = parseSuggestion(h.states[r.suggestion_entity]?.state);
+      const icon = r.icon || "mdi:home";
+      if (!s) {
+        return `<div class="well roomrow"><div class="head"><span class="ticon off"><ha-icon icon="${esc(icon)}"></ha-icon></span>
+          <span class="title"><span class="room">${esc(r.name)}</span><span class="pick" style="color:var(--secondary-text-color)">No pick yet</span></span></div></div>`;
       }
-    } else if (s.kind === "scentsy" && c.scentsy_entity) {
-      const options = h.states[c.scentsy_entity]?.attributes?.options || [];
-      const option = options.find((o) => o.toLowerCase() === s.name.toLowerCase());
-      if (option) await this._call(c.scentsy_entity.split(".")[0], "select_option", { entity_id: c.scentsy_entity, option });
-      const warmers = (c.warmers || []).map((w) => (typeof w === "string" ? w : w.entity));
-      if (warmers.length) await this._call("homeassistant", "turn_on", { entity_id: warmers });
+      const isPura = s.kind === "pura";
+      const tagC = isPura ? "var(--teal-color,#009688)" : "var(--purple-color,#926bc7)";
+      const tagText = isPura ? `Pura · slot ${s.slot}${s.intensity ? " · " + titleCase(s.intensity) : ""}` : s.kind === "scentsy" ? "Scentsy" : "";
+      let running = false;
+      if (isPura && r.pura_device_id) {
+        const p = findPura(h, r.pura_device_id);
+        running = h.states[p.fragrance]?.state === `slot_${s.slot}`;
+      } else if (s.kind === "scentsy" && r.scentsy_entity) {
+        const warm = (r.warmers || []).some((w) => h.states[typeof w === "string" ? w : w.entity]?.state === "on");
+        running = h.states[r.scentsy_entity]?.state?.toLowerCase() === s.name.toLowerCase() && warm;
+      }
+      const canStart = c.show_start !== false && ((isPura && r.pura_device_id) || (s.kind === "scentsy" && r.scentsy_entity));
+      const start = running
+        ? `<span class="tag" style="--c:var(--green-color,#4caf50)">On now</span>`
+        : canStart ? `<button class="btn small on" style="--c:var(--amber-color,#ffc107)" data-a="start" data-i="${i}">Start</button>` : "";
+      const scores = String(h.states[r.scores_entity]?.state || "");
+      const others = c.show_scores !== false && scores && !["unknown", "unavailable"].includes(scores)
+        ? scores.split("·").map((x) => x.trim()).filter((x) => x && !x.toLowerCase().startsWith(s.name.toLowerCase())).slice(0, Number(c.max_scores ?? 4))
+        : [];
+      const open = this._open?.[i];
+      return `<div class="well roomrow">
+        <div class="head">
+          <button class="ticon" style="--c:var(--amber-color,#ffc107)" data-a="nav" data-i="${i}" aria-label="${esc(r.name)}"><ha-icon icon="${esc(icon)}"></ha-icon></button>
+          <span class="title" data-a="nav" data-i="${i}"><span class="room">${esc(r.name)}</span><span class="pick">${esc(s.name)}</span></span>
+          ${s.score ? `<span class="score" style="--c:${tagC}" title="Score">${esc(s.score)}</span>` : ""}
+          ${start}
+        </div>
+        <div class="chips">${tagText ? `<span class="tag" style="--c:${tagC}">${esc(tagText)}</span>` : ""}${s.isNew ? `<span class="tag" style="--c:var(--green-color,#4caf50)">New to you</span>` : ""}</div>
+        ${c.show_reason !== false && s.reason ? `<span class="reason${open ? " open" : ""}" data-a="expand" data-i="${i}" role="button" tabindex="0" aria-expanded="${!!open}">${esc(s.reason)}</span>` : ""}
+        ${others.length ? `<div class="chips">${others.map((o) => `<span class="tag">${esc(o)}</span>`).join("")}</div>` : ""}
+      </div>`;
+    }).join("");
+
+    return `<ha-card>
+      ${this._tile({ icon: c.icon, name: c.title, c: "var(--deep-orange-color,#ff6f22)", state: summary, wrapState: true, iconAction: "more-info", iconData: `data-entity="${c.summary_entity || ""}"` })}
+      <div class="body">
+        ${updated || regen ? `<div class="row" style="justify-content:space-between;padding-left:46px">${updated}${regen}</div>` : ""}
+        ${rows}
+      </div></ha-card>`;
+  }
+
+  _action(a, el) {
+    const c = this._config;
+    const r = c.rooms?.[Number(el.dataset.i)];
+    if (a === "more-info") return this._moreInfo(el.dataset.entity);
+    if (a === "refresh") {
+      if (this._armed("refresh")) {
+        this._toast("Asking for fresh scent suggestions…");
+        return this._toggle(c.refresh_entity);
+      }
+      return undefined;
     }
+    if (a === "expand") { (this._open ||= {})[el.dataset.i] = !this._open[el.dataset.i]; return this._render(true); }
+    if (a === "nav") return r?.navigation_path ? this._navigate(r.navigation_path) : this._moreInfo(r?.suggestion_entity);
+    if (a === "start" && r) return this._startSuggestion(parseSuggestion(this._hass.states[r.suggestion_entity]?.state), r);
+    return undefined;
+  }
+
+  _keydown(ev) {
+    if ((ev.key === "Enter" || ev.key === " ") && ev.target.matches?.('[data-a="expand"]')) {
+      ev.preventDefault();
+      return this._action("expand", ev.target);
+    }
+    return super._keydown(ev);
+  }
+}
+
+/* ------------------------------------------------------------------ Loaded now */
+
+class FragranceLoadedCard extends FcBase {
+  static defaults() {
+    return { title: "Loaded now", icon: "mdi:spray", show_pod_images: true, show_scentsy: true, low_threshold: 30, critical_threshold: 15, gloss: true, rooms: [] };
+  }
+
+  static getStubConfig(hass) {
+    const devs = [...new Set(Object.values(hass?.entities || {}).filter((e) => e.platform === "pura" && e.device_id).map((e) => e.device_id))];
+    return { rooms: devs.slice(0, 4).map((d) => ({ name: deviceName(hass, d) || "Room", pura_device_id: d })) };
+  }
+
+  static getConfigForm() {
+    const fields = { name: ROOM_FIELDS.name, icon: ROOM_FIELDS.icon, pura_device_id: ROOM_FIELDS.pura_device_id, scentsy_entity: ROOM_FIELDS.scentsy_entity, warmers: ROOM_FIELDS.warmers, navigation_path: ROOM_FIELDS.navigation_path };
+    return {
+      schema: [
+        { type: "grid", name: "", schema: [
+          { name: "title", selector: { text: {} } },
+          { name: "icon", selector: { icon: {} } },
+        ] },
+        { name: "rooms", selector: { object: { multiple: true, label_field: "name", fields } } },
+        { type: "expandable", name: "", title: "Show", flatten: true, schema: [
+          { type: "grid", name: "", schema: [
+            { name: "show_header", selector: { boolean: {} } },
+            { name: "show_pod_images", selector: { boolean: {} } },
+            { name: "show_scentsy", selector: { boolean: {} } },
+            { name: "gloss", selector: { boolean: {} } },
+            { name: "low_threshold", selector: { number: { min: 0, max: 100, unit_of_measurement: "%", mode: "box" } } },
+            { name: "critical_threshold", selector: { number: { min: 0, max: 100, unit_of_measurement: "%", mode: "box" } } },
+          ] },
+        ] },
+      ],
+      computeLabel: (s) => LABELS[s.name] || titleCase(s.name),
+      computeHelper: (s) => HELPERS[s.name],
+    };
+  }
+
+  getCardSize() {
+    return 2 + 2 * (this._config?.rooms?.length || 0);
+  }
+
+  _watch() {
+    const ids = [];
+    for (const r of this._config.rooms || []) {
+      const p = findPura(this._hass, r.pura_device_id);
+      ids.push(p.fragrance, r.scentsy_entity, ...(r.warmers || []).map((w) => (typeof w === "string" ? w : w.entity)));
+      for (const b of Object.values(p.bays)) ids.push(b.name, b.remaining);
+    }
+    return ids;
+  }
+
+  _html() {
+    const c = this._config;
+    const h = this._hass;
+    const teal = "var(--teal-color,#009688)";
+    let diffusing = 0;
+    let warming = 0;
+    const rows = (c.rooms || []).map((r, i) => {
+      const p = findPura(h, r.pura_device_id);
+      const sel = h.states[p.fragrance]?.state || "";
+      const bays = Object.values(p.bays).sort((a, b) => a.slot - b.slot);
+      const levels = bays.map((b) => num(h.states[b.remaining]?.state, 100));
+      const min = levels.length ? Math.min(...levels) : 100;
+      const iconC = min < Number(c.critical_threshold) ? "var(--error-color,#db4437)" : min < Number(c.low_threshold) ? "var(--orange-color,#ff9800)" : teal;
+      const active = bays.find((b) => `slot_${b.slot}` === sel);
+      if (active) diffusing += 1;
+      const warmers = (r.warmers || []).map((w) => (typeof w === "string" ? w : w.entity));
+      const warmOn = warmers.filter((w) => h.states[w]?.state === "on").length;
+      if (warmOn) warming += 1;
+      const bar = r.scentsy_entity ? h.states[r.scentsy_entity]?.state : "";
+      const hasBar = bar && !["None", "none", "unknown", "unavailable", ""].includes(bar);
+      const scentsy = c.show_scentsy === false || !r.scentsy_entity ? ""
+        : hasBar ? `<span class="tag" style="--c:var(--purple-color,#926bc7)"><ha-icon icon="mdi:candle" style="--mdc-icon-size:12px"></ha-icon>${esc(bar)}${warmers.length ? (warmOn ? " · warming" : " · off") : ""}</span>`
+        : `<span class="muted">No Scentsy bar</span>`;
+      const pods = bays.map((b, j) => {
+        const st = h.states[b.name];
+        const name = st?.state && !["unknown", "unavailable"].includes(st.state) ? st.state : `Slot ${b.slot}`;
+        const pct = levels[j];
+        const low = pct < Number(c.low_threshold);
+        const on = `slot_${b.slot}` === sel;
+        const pic = c.show_pod_images !== false && st?.attributes?.entity_picture;
+        return `<div class="pod well${on ? " on" : ""}" style="--c:${teal}" title="${esc(name)}">
+          ${pic ? `<img src="${esc(pic)}" alt="">` : podSvg(pct, low ? "var(--error-color,#db4437)" : teal)}
+          <span class="t"><span class="n">${esc(name)}</span><span class="level${pct < Number(c.critical_threshold) ? " low" : ""}"><span style="width:${pct}%"></span></span>
+          <span class="state${low ? "" : ""}" style="${low ? "color:var(--error-color,#db4437)" : ""}">${pct}%${on ? " · on" : ""}</span></span></div>`;
+      }).join("");
+      const status = active ? `Diffusing ${esc(h.states[active.name]?.state || "")}` : p.fragrance ? "Pura idle" : "";
+      return `<div class="well roomrow">
+        <div class="head">
+          <button class="ticon${active || warmOn ? "" : " off"}" style="--c:${iconC}" data-a="nav" data-i="${i}" aria-label="${esc(r.name)}"><ha-icon icon="${esc(r.icon || "mdi:scent")}"></ha-icon></button>
+          <span class="title" data-a="nav" data-i="${i}"><span class="pick" style="font-size:14px">${esc(r.name)}</span><span class="room">${status}</span></span>
+          ${scentsy}
+        </div>
+        ${pods ? `<div class="pods" style="--n:${Math.max(1, bays.length)}">${pods}</div>` : ""}
+      </div>`;
+    }).join("");
+    const state = [`${diffusing} diffusing`, c.show_scentsy === false ? "" : `${warming} warming`].filter(Boolean).join(" · ");
+    const header = c.show_header === false ? "" : this._tile({ icon: c.icon, name: c.title, state, c: teal, off: !diffusing && !warming });
+    return `<ha-card>${header}<div class="body"${header ? "" : ' style="padding-top:10px"'}>${rows}</div></ha-card>`;
+  }
+
+  _action(a, el) {
+    const r = this._config.rooms?.[Number(el.dataset.i)];
+    if (a === "nav" && r) return r.navigation_path ? this._navigate(r.navigation_path) : this._moreInfo(findPura(this._hass, r.pura_device_id).fragrance);
+    return undefined;
   }
 }
 
@@ -1043,6 +1357,8 @@ const LABELS = {
   pura_color: "Pura color", pura_count_key: "Pura count field", scentsy_count_key: "Scentsy count field", pura_level_key: "Open pod level field",
   show_totals: "Totals", show_families: "Families", show_low: "Running low", max_low: "Running low rows", show_search: "Search",
   show_add: "Add button", sort: "Sort", max_items: "Rows shown",
+  summary_entity: "Whole-home summary", rooms: "Rooms", show_updated: "Updated time", show_reason: "Why", show_start: "Start buttons",
+  max_scores: "Runner-ups shown", critical_threshold: "Red below", show_header: "Header",
 };
 
 const HELPERS = {
@@ -1053,6 +1369,8 @@ const HELPERS = {
   pura_level_key: "e.g. Pod level",
   suggestion_entity: "Text like \"Pura: slot 1 Simmered Cider, medium (68) — reason\" or \"Scentsy: Stargazing (65) — reason\"",
   entities: "Shown as tiles under the card, with a brightness slider for dimmable lights.",
+  refresh_entity: "Pressed by Regenerate (tap twice to confirm).",
+  rooms: "Each room: its suggestion, Pura diffuser and Scentsy picker.",
 };
 
 /* ------------------------------------------------------------------ register */
@@ -1060,6 +1378,8 @@ const HELPERS = {
 const CARDS = [
   ["pura-mini-card", PuraMiniCard, "Pura Mini", "One Pura diffuser: pods with pictures, intensity slider and toggles."],
   ["room-fragrance-card", RoomFragranceCard, "Room Fragrance", "Today's pick, Pura, Scentsy warmers and extra tiles for one room."],
+  ["fragrance-picks-card", FragrancePicksCard, "Fragrance Picks", "Today's suggested scent for each room, with Start and Regenerate."],
+  ["fragrance-loaded-card", FragranceLoadedCard, "Fragrance Loaded", "What's loaded in each room: Pura pods with levels, and the Scentsy bar."],
   ["fragrance-stash-card", FragranceStashCard, "Fragrance Stash", "What's on the shelf from your todo lists: totals, families, running low."],
   ["fragrance-inventory-card", FragranceInventoryCard, "Fragrance Inventory", "Manage pods and bars in your todo lists: counts, ratings, used up, add."],
 ];

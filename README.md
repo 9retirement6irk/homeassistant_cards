@@ -8,6 +8,8 @@ They're built like the built-in tile card and draw their surfaces from your them
 | --- | --- |
 | `custom:pura-mini-card` | One Pura diffuser: each pod with its picture and level, an intensity slider, power, auto-alternate and nightlight. |
 | `custom:room-fragrance-card` | A room's fragrance as a stack of tiles: today's pick, Pura, the Scentsy bar and warmers, and any extra tiles (like a candle warmer lamp). |
+| `custom:fragrance-picks-card` | Today's suggested scent for each room, with Start, the reason and the runner-ups. |
+| `custom:fragrance-loaded-card` | What's loaded in each room: Pura pods with pictures and levels, and the Scentsy bar. |
 | `custom:fragrance-stash-card` | What's on the shelf: totals, a by-family breakdown and what's running low. Read-only. |
 | `custom:fragrance-inventory-card` | Manage the lists: search, filter by family, change counts, rate, mark one used up, add new scents. |
 
@@ -24,7 +26,7 @@ They're built like the built-in tile card and draw their surfaces from your them
 
 Copy `dist/fragrance-cards.js` to `/config/www/`, then add `/local/fragrance-cards.js` as a JavaScript module under Settings > Dashboards > ⋮ > Resources.
 
-All four cards have a visual editor. The YAML below shows every option.
+Every card has a visual editor. The YAML below shows every option.
 
 ## Pura Mini
 
@@ -146,3 +148,50 @@ max_items: 50
 ## Theme notes
 
 Cards render inside `ha-card`, so a theme's card background, border and radius apply. Accent colors accept theme color names (`teal`, `purple`, `amber`…) or any CSS color.
+
+## Fragrance Picks
+
+Today's suggested scent for each room, from the same suggestion text as Room Fragrance. **Start** starts it (Pura slot and intensity, or Scentsy bar and warmers), **On now** shows when it's already running, and **Regenerate** presses your refresh button after a second tap.
+
+```yaml
+type: custom:fragrance-picks-card
+title: Whole home
+icon: mdi:home-heart
+summary_entity: input_text.scent_suggestion_whole_home
+refresh_entity: input_button.refresh_scent_suggestions
+show_updated: true
+show_reason: true      # tap the reason to expand it
+show_scores: true      # runner-ups as chips
+max_scores: 4
+show_start: true
+rooms:
+  - name: Main Room
+    icon: mdi:sofa
+    suggestion_entity: input_text.scent_suggestion_main_room
+    scores_entity: input_text.scent_scores_main_room
+    pura_device_id: 3db7f956aae6c0ffb4f238c432ad2e18
+    scentsy_entity: input_select.main_room_scentsy_bar
+    warmers: [switch.kitchen_scentsy, switch.buffet_scentsy]
+    navigation_path: /lovelace/main
+```
+
+## Fragrance Loaded
+
+What's in each room right now: each Pura pod with its picture and level (the running one glows), and the Scentsy bar.
+
+```yaml
+type: custom:fragrance-loaded-card
+title: Loaded now
+show_header: true
+show_pod_images: true
+show_scentsy: true
+low_threshold: 30        # % shown in red text
+critical_threshold: 15   # % where the room icon and bar turn red
+rooms:
+  - name: Main Room
+    icon: mdi:sofa
+    pura_device_id: 3db7f956aae6c0ffb4f238c432ad2e18
+    scentsy_entity: input_select.main_room_scentsy_bar
+    warmers: [switch.kitchen_scentsy]
+    navigation_path: /lovelace/main
+```
