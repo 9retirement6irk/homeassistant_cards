@@ -11,7 +11,7 @@
  *   custom:fragrance-inventory-card manage the todo lists: counts, ratings, used up
  */
 
-const VERSION = "0.4.0";
+const VERSION = "0.4.1";
 
 /* ------------------------------------------------------------------ helpers */
 
@@ -65,6 +65,14 @@ function findPura(hass, deviceId) {
   return found;
 }
 
+/** The slot a suggested Pura scent is in: the one it names, or the bay now holding that scent (after a swap). */
+function puraSlotFor(hass, p, s) {
+  if (s.slot) return s.slot;
+  const want = s.name.toLowerCase();
+  const bay = Object.values(p.bays || {}).find((b) => String(hass?.states?.[b.name]?.state || "").toLowerCase() === want);
+  return bay ? bay.slot : null;
+}
+
 /** "Key: value" lines in a todo item's description. */
 function parseDesc(desc) {
   const fields = {};
@@ -106,8 +114,11 @@ function parseSuggestion(text) {
   if (!t || ["unknown", "unavailable"].includes(t)) return null;
   const [head, ...rest] = t.split(/\s+[—–-]\s+/);
   const reason = rest.join(" — ").trim();
-  let m = /^Pura:\s*slot\s*(\d)\s+(.+?)(?:,\s*([a-z]+))?\s*(?:\((\d+)\))?$/i.exec(head.trim());
-  if (m) return { kind: "pura", slot: Number(m[1]), name: m[2].trim(), intensity: (m[3] || "").toLowerCase(), score: m[4], reason };
+  let m = /^Pura:\s*(?:slot\s*(\d)|swap(?:\s+in)?)\s+(.+?)(?:,\s*([a-z]+))?\s*(?:\((\d+)\))?$/i.exec(head.trim());
+  if (m) {
+    return { kind: "pura", slot: m[1] ? Number(m[1]) : null, swap: !m[1], name: m[2].replace(/^🆕\s*/u, "").trim(), isNew: /🆕/u.test(m[2]),
+      intensity: (m[3] || "").toLowerCase(), score: m[4], reason };
+  }
   m = /^Scentsy:\s*(.+?)\s*(?:\((\d+)\))?$/i.exec(head.trim());
   if (m) return { kind: "scentsy", name: m[1].replace(/^🆕\s*/u, "").trim(), isNew: /🆕/u.test(m[1]), score: m[2], reason };
   return { kind: "text", name: head.trim(), reason };
@@ -353,8 +364,10 @@ class FcBase extends HTMLElement {
     if (!s || !room) return;
     if (s.kind === "pura" && room.pura_device_id) {
       const p = findPura(h, room.pura_device_id);
+      const slot = puraSlotFor(h, p, s);
       if (!p.fragrance) return;
-      await this._call("select", "select_option", { entity_id: p.fragrance, option: `slot_${s.slot}` });
+      if (!slot) { this._toast(`Load ${s.name} into the Pura first`); return; }
+      await this._call("select", "select_option", { entity_id: p.fragrance, option: `slot_${slot}` });
       const options = h.states[p.intensity]?.attributes?.options || [];
       if (s.intensity && options.includes(s.intensity)) {
         setTimeout(() => this._call("select", "select_option", { entity_id: p.intensity, option: s.intensity }), 1500);
@@ -630,11 +643,11 @@ class RoomFragranceCard extends PuraMixin(FcBase) {
       const s = parseSuggestion(h.states[c.suggestion_entity]?.state);
       if (s) {
         const headline = s.kind === "pura"
-          ? `${esc(s.name)} on Pura${s.intensity ? ", " + esc(s.intensity) : ""}`
+          ? `${s.isNew ? "🆕 " : ""}${esc(s.name)} on Pura${s.swap ? " (swap the pod in)" : ""}${s.intensity ? ", " + esc(s.intensity) : ""}`
           : s.kind === "scentsy" ? `${esc(s.name)} in the Scentsy warmers` : esc(s.name);
         const scores = c.show_scores !== false && c.scores_entity ? String(h.states[c.scores_entity]?.state || "") : "";
         const next = scores && !["unknown", "unavailable"].includes(scores) ? scores.split("·").map((x) => x.trim()).filter((x) => !x.startsWith(s.name)).slice(0, 2).join(" · ") : "";
-        const canStart = s.kind === "pura" ? !!this._pura().fragrance : s.kind === "scentsy" ? !!c.scentsy_entity : false;
+        const canStart = s.kind === "pura" ? !!this._pura().fragrance && !!puraSlotFor(h, this._pura(), s) : s.kind === "scentsy" ? !!c.scentsy_entity : false;
         parts.push(`<ha-card>
           ${this._tile({ icon: "mdi:creation", name: "Today's pick", c: "var(--amber-color,#ffc107)", wrapState: true,
             state: `<span style="color:var(--primary-text-color)">${headline}.</span> ${esc(s.reason)}${next ? `<br>Next: ${esc(next)}` : ""}`,
@@ -813,19 +826,21 @@ class FragrancePicksCard extends FcBase {
           <span class="title"><span class="room">${esc(r.name)}</span><span class="pick" style="color:var(--secondary-text-color)">No pick yet</span></span></div></div>`;
       }
       const isPura = s.kind === "pura";
+      const pp = isPura && r.pura_device_id ? findPura(h, r.pura_device_id) : null;
+      const slot = isPura ? (pp ? puraSlotFor(h, pp, s) : s.slot) : null;
       const tagC = isPura ? "var(--teal-color,#009688)" : "var(--purple-color,#926bc7)";
-      const tagText = isPura ? `Pura · slot ${s.slot}${s.intensity ? " · " + titleCase(s.intensity) : ""}` : s.kind === "scentsy" ? "Scentsy" : "";
+      const tagText = isPura ? `Pura · ${slot ? "slot " + slot : "swap in"}${s.intensity ? " · " + titleCase(s.intensity) : ""}` : s.kind === "scentsy" ? "Scentsy" : "";
       let running = false;
       if (isPura && r.pura_device_id) {
-        const p = findPura(h, r.pura_device_id);
-        running = h.states[p.fragrance]?.state === `slot_${s.slot}`;
+        running = !!slot && h.states[pp.fragrance]?.state === `slot_${slot}`;
       } else if (s.kind === "scentsy" && r.scentsy_entity) {
         const warm = (r.warmers || []).some((w) => h.states[typeof w === "string" ? w : w.entity]?.state === "on");
         running = h.states[r.scentsy_entity]?.state?.toLowerCase() === s.name.toLowerCase() && warm;
       }
-      const canStart = c.show_start !== false && ((isPura && r.pura_device_id) || (s.kind === "scentsy" && r.scentsy_entity));
+      const canStart = c.show_start !== false && ((isPura && r.pura_device_id && slot) || (s.kind === "scentsy" && r.scentsy_entity));
       const start = running
         ? `<span class="tag" style="--c:var(--green-color,#4caf50)">On now</span>`
+        : isPura && !slot && c.show_start !== false ? `<span class="tag" style="--c:var(--teal-color,#009688)" title="Put this pod in the Pura, then Start appears">Load pod</span>`
         : canStart ? `<button class="btn small on" style="--c:var(--amber-color,#ffc107)" data-a="start" data-i="${i}">Start</button>` : "";
       const scores = String(h.states[r.scores_entity]?.state || "");
       const others = c.show_scores !== false && scores && !["unknown", "unavailable"].includes(scores)
