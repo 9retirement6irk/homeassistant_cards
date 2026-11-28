@@ -9,9 +9,11 @@
  *   custom:fragrance-loaded-card   what's loaded in each room
  *   custom:fragrance-stash-card    what's on the shelf, from your todo lists
  *   custom:fragrance-inventory-card manage the todo lists: counts, ratings, used up
+ *   custom:wear-pick-card          what perfume to wear today and tonight, with bottle pictures
+ *   custom:perfume-collection-card your perfume bottles as a shelf: pictures, Parfumo data, ratings
  */
 
-const VERSION = "0.5.2";
+const VERSION = "0.6.0";
 
 /* ------------------------------------------------------------------ helpers */
 
@@ -306,7 +308,7 @@ class FcBase extends HTMLElement {
     const key = this._stateKey() + "#" + (this._localKey ? this._localKey() : "");
     if (!force && (busy || key === this._key)) return;
     this._key = key;
-    this.shadowRoot.innerHTML = `<style>${STYLE}</style>${this._html()}`;
+    this.shadowRoot.innerHTML = `<style>${STYLE}${this.constructor.extraStyle || ""}</style>${this._html()}`;
   }
 
   _call(domain, service, data) {
@@ -1524,6 +1526,571 @@ class FragranceInventoryCard extends TodoMixin(FcBase) {
   }
 }
 
+/* ------------------------------------------------------------------ wearable perfumes (shared) */
+
+/** "Name (59) — reason 🌿": the wear suggestion line. Splits on an em or en dash only, since bottle names can hold hyphens. */
+function parseWear(text) {
+  const t = String(text || "").trim();
+  if (!t || ["unknown", "unavailable"].includes(t)) return null;
+  const [head, ...rest] = t.split(/\s+[—–]\s+/);
+  const m = /^(.+?)\s*\((\d+)\)\s*$/.exec(head.trim());
+  return { name: (m ? m[1] : head).trim(), score: m ? m[2] : "", reason: rest.join(" — ").trim() };
+}
+
+/** The first number in "6.5/10" (num() would read 6.510). */
+const lead = (v) => {
+  const m = /-?\d+(?:\.\d+)?/.exec(String(v ?? ""));
+  return m ? Number(m[0]) : NaN;
+};
+
+/** "Spring 30%, Summer 27%, …" → [["Spring", 30], …], largest first. */
+const parseVotes = (v) =>
+  [...String(v || "").matchAll(/([^,]+?)\s+(\d+(?:\.\d+)?)%/g)].map((m) => [m[1].trim(), Number(m[2])]).sort((a, b) => b[1] - a[1]);
+
+const daysSince = (ymd) => Math.round((Date.parse(`${localDate()}T12:00:00`) - Date.parse(`${ymd}T12:00:00`)) / 86400000);
+const wornAgo = (ymd) => {
+  if (!ymd) return "never worn";
+  const d = daysSince(ymd);
+  return d <= 0 ? "worn today" : d === 1 ? "worn yesterday" : d < 14 ? `worn ${d} days ago` : d < 60 ? `worn ${Math.round(d / 7)} weeks ago` : `worn ${Math.round(d / 30)} months ago`;
+};
+
+const localDate = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+/* A drawn bottle, shown when there's no Parfumo picture. */
+const bottleSvg = (c) =>
+  `<svg viewBox="0 0 60 80" aria-hidden="true"><rect x="24" y="4" width="12" height="10" rx="2" fill="#cfcac0"/><rect x="21" y="13" width="18" height="6" rx="1.5" fill="#b9b3a7"/><rect x="10" y="19" width="40" height="57" rx="8" fill="rgba(255,255,255,.18)" stroke="rgba(255,255,255,.55)"/><rect x="13" y="40" width="34" height="33" rx="6" fill="${c}" opacity=".6"/><rect x="15" y="23" width="4" height="47" rx="2" fill="#fff" opacity=".35"/></svg>`;
+
+const WEAR_STYLE = `
+.bottle{--s:64px;width:var(--s);height:var(--s);flex:none;border-radius:calc(var(--fc-radius) - 2px);background:#fff;display:flex;align-items:center;justify-content:center;overflow:hidden;
+  box-shadow:0 1px 3px rgba(0,0,0,.35),inset 0 0 0 1px rgba(0,0,0,.06)}
+.bottle img{width:100%;height:100%;object-fit:contain}
+.bottle svg{width:66%;height:82%;filter:drop-shadow(0 2px 2px rgba(0,0,0,.35))}
+.bottle.none{background:color-mix(in srgb,var(--c,#6e41ab) 16%,transparent);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--c,#6e41ab) 30%,transparent)}
+.bottle.sm{--s:44px}
+.bottle.lg{--s:112px}
+.wearrow{padding:10px;display:flex;flex-direction:column;gap:8px}
+.wearrow .head{display:flex;align-items:center;gap:12px}
+.wearrow .title{display:flex;flex-direction:column;min-width:0;flex:1;cursor:pointer}
+.wearrow .slotname{font-size:12px;color:var(--secondary-text-color);line-height:16px;display:flex;align-items:center;gap:4px}
+.wearrow .slotname ha-icon{--mdc-icon-size:14px}
+.wearrow .pick{font-size:16px;font-weight:600;line-height:21px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.wearrow .brand{font-size:12px;color:var(--secondary-text-color);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.shelf{display:grid;grid-template-columns:repeat(auto-fill,minmax(var(--w,104px),1fr));gap:8px}
+.btl{font:inherit;color:var(--primary-text-color);border:none;cursor:pointer;padding:8px;display:flex;flex-direction:column;align-items:stretch;gap:6px;text-align:center;min-width:0}
+.btl .bottle{--s:auto;width:100%;height:auto;aspect-ratio:1}
+.btl .n{font-size:13px;font-weight:600;line-height:16px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.btl .s{font-size:11px;line-height:14px;color:var(--secondary-text-color);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.btl.sel{box-shadow:inset 0 2px 5px rgba(0,0,0,.45),0 0 0 1.5px var(--c),0 0 10px color-mix(in srgb,var(--c) 60%,transparent)}
+.btl.done{opacity:.6}
+.btl .wait{font-size:11px;color:var(--c)}
+.detail{padding:10px;display:flex;flex-direction:column;gap:10px}
+.detail .top{display:flex;gap:12px;align-items:flex-start}
+.detail .top .t{display:flex;flex-direction:column;gap:3px;min-width:0;flex:1}
+.detail .top .n{font-size:17px;font-weight:600;line-height:22px}
+.meter{display:grid;grid-template-columns:76px minmax(0,1fr) 40px;align-items:center;gap:8px;font-size:12px}
+.meter .l{color:var(--secondary-text-color)}
+.meter .v{text-align:right;color:var(--primary-text-color);font-weight:600}
+.meters{display:flex;flex-direction:column;gap:6px}
+.sub{font-size:12px;font-weight:600;color:var(--secondary-text-color);text-transform:uppercase;letter-spacing:.04em}
+a.btn{text-decoration:none}
+`;
+
+/** Shared by the wear cards: reads the perfume list (one bottle per item) and its "Key: value" lines. */
+const WearMixin = (Base) =>
+  class extends TodoMixin(Base) {
+    static get extraStyle() {
+      return WEAR_STYLE;
+    }
+
+    _lists() {
+      const c = this._config;
+      return c.list ? [{ id: "wear", entity: c.list, name: "Fragrances", c: color(c.color, "var(--deep-purple-color, #6e41ab)") }] : [];
+    }
+
+    _accent() {
+      return this._lists()[0]?.c || "var(--deep-purple-color, #6e41ab)";
+    }
+
+    _bottles() {
+      const l = this._lists()[0];
+      if (!l) return [];
+      return (this._items?.[l.entity] || []).map((i) => {
+        const f = parseDesc(i.description);
+        const accords = String(f.Accords || "").split(",").map((x) => x.trim()).filter((x) => x && x.toLowerCase() !== "unknown");
+        const parfumo = String(f.Parfumo || "");
+        return {
+          uid: i.uid, name: i.summary, desc: i.description || "", f, done: i.status === "completed",
+          brand: f.Brand || "", stars: stars(f.Stars), lastUsed: /^\d{4}-\d{2}-\d{2}$/.test(f["Last used"] || "") ? f["Last used"] : "",
+          image: f.Image || "", accords, family: accords[0] || "Unsorted",
+          url: /^https?:\/\//.test(parfumo) ? parfumo : "", pending: !parfumo, notFound: /^not found/i.test(parfumo),
+          score: lead(f["Parfumo score"]), longevity: lead(f.Longevity), sillage: lead(f.Sillage),
+          season: parseVotes(f["Season votes"]), occasion: parseVotes(f["Occasion votes"]),
+          liked: num(f.Liked, 0), disliked: num(f.Disliked, 0),
+        };
+      });
+    }
+
+    _bottle(name) {
+      const want = String(name || "").trim().toLowerCase();
+      return this._bottles().find((b) => b.name.trim().toLowerCase() === want);
+    }
+
+    /** The bottle's Parfumo picture, or a drawn bottle. */
+    _img(b, cls = "", size = 240) {
+      const c = this._accent();
+      if (this._config.show_images === false || !b?.image) return `<span class="bottle none ${cls}" style="--c:${c}">${bottleSvg(c)}</span>`;
+      const src = /[?&]width=/.test(b.image) ? b.image : `${b.image}${b.image.includes("?") ? "&" : "?"}width=${size}&aspect_ratio=1:1`;
+      return `<span class="bottle ${cls}"><img src="${esc(src)}" alt="" loading="lazy" referrerpolicy="no-referrer"></span>`;
+    }
+
+    _setLines(b, changes, status) {
+      const data = { item: b.uid, description: setFields(b.desc, changes) };
+      if (status) data.status = status;
+      return this._hass.callService("todo", "update_item", data, { entity_id: this._lists()[0].entity }).catch((err) => this._toast(err?.message || String(err)));
+    }
+
+    _feedback(vote, b) {
+      const c = this._config;
+      if (!c.feedback_script) {
+        if (vote === "wear") return this._setLines(b, { "Last used": localDate() });
+        return undefined;
+      }
+      return this._call("script", "turn_on", { entity_id: c.feedback_script, variables: { vote, scent: b.name } });
+    }
+
+    _voteKey(b) {
+      return `fc-wear:${localDate()}:${b.name}`.toLowerCase();
+    }
+
+    _myVote(b) {
+      try {
+        return localStorage.getItem(this._voteKey(b)) || (this._votes || {})[this._voteKey(b)] || "";
+      } catch (e) {
+        return (this._votes || {})[this._voteKey(b)] || "";
+      }
+    }
+
+    _vote(v, b) {
+      if (this._myVote(b) === v) { this._toast("Already noted"); return; }
+      (this._votes ||= {})[this._voteKey(b)] = v;
+      try { localStorage.setItem(this._voteKey(b), v); } catch (e) { /* this page only */ }
+      this._toast(v === "up" ? `Noted: more ${b.name}` : `Noted: less ${b.name}`);
+      this._feedback(v, b);
+      this._render(true);
+    }
+
+    _starsHtml(b, size = 20) {
+      return [1, 2, 3, 4, 5].map((n) => `<button class="starbtn${n <= b.stars ? " on" : ""}" style="font-size:${size}px" data-a="rate" data-uid="${esc(b.uid)}" data-n="${n}" aria-label="Rate ${n} of 5">★</button>`).join("");
+    }
+
+    _meter(label, value, max, c, unit = "") {
+      if (!Number.isFinite(value)) return "";
+      const pct = Math.max(0, Math.min(100, (value / max) * 100));
+      return `<div class="meter"><span class="l">${esc(label)}</span><span class="level"><span style="--c:${c};width:${pct}%"></span></span><span class="v">${esc(String(value))}${unit}</span></div>`;
+    }
+
+    _wearAction(a, el) {
+      const b = el.dataset.uid ? this._bottles().find((x) => x.uid === el.dataset.uid) : null;
+      if (!b) return false;
+      if (a === "rate") { this._toast(`Rated ${b.name} ${el.dataset.n} of 5`); this._setLines(b, { Stars: `${el.dataset.n}/5` }); return true; }
+      if (a === "wear") { this._toast(`Wearing ${b.name} today`); this._feedback("wear", b); return true; }
+      if (a === "vote") { this._vote(el.dataset.v, b); return true; }
+      return false;
+    }
+  };
+
+/* ------------------------------------------------------------------ What to wear */
+
+class WearPickCard extends WearMixin(FcBase) {
+  static defaults() {
+    return { title: "What to wear", icon: "mdi:spray", list: "todo.fragrances", day_entity: "input_text.wear_suggestion_day", evening_entity: "input_text.wear_suggestion_evening",
+      scores_entity: "input_text.wear_scores", refresh_entity: "input_button.refresh_wear_suggestion", feedback_script: "script.fragrance_feedback",
+      show_images: true, show_details: true, show_scores: true, show_updated: true, max_scores: 4, evening_today_only: true, gloss: true };
+  }
+
+  static getStubConfig() {
+    return { list: "todo.fragrances", day_entity: "input_text.wear_suggestion_day", evening_entity: "input_text.wear_suggestion_evening" };
+  }
+
+  static getConfigForm() {
+    return {
+      schema: [
+        { type: "grid", name: "", schema: [
+          { name: "title", selector: { text: {} } },
+          { name: "icon", selector: { icon: {} } },
+        ] },
+        { name: "list", selector: { entity: { domain: ["todo"] } } },
+        { type: "grid", name: "", schema: [
+          { name: "day_entity", selector: { entity: { domain: ["input_text", "sensor", "text"] } } },
+          { name: "evening_entity", selector: { entity: { domain: ["input_text", "sensor", "text"] } } },
+          { name: "scores_entity", selector: { entity: { domain: ["input_text", "sensor", "text"] } } },
+          { name: "refresh_entity", selector: { entity: { domain: ["input_button", "button", "script", "automation"] } } },
+        ] },
+        { name: "feedback_script", selector: { entity: { domain: ["script"] } } },
+        { type: "expandable", name: "", title: "Show", flatten: true, schema: [
+          { type: "grid", name: "", schema: [
+            { name: "show_images", selector: { boolean: {} } },
+            { name: "show_details", selector: { boolean: {} } },
+            { name: "show_scores", selector: { boolean: {} } },
+            { name: "show_updated", selector: { boolean: {} } },
+            { name: "evening_today_only", selector: { boolean: {} } },
+            { name: "gloss", selector: { boolean: {} } },
+            { name: "color", selector: { ui_color: {} } },
+            { name: "max_scores", selector: { number: { min: 0, max: 10, mode: "box" } } },
+          ] },
+        ] },
+      ],
+      computeLabel: (s) => LABELS[s.name] || titleCase(s.name),
+      computeHelper: (s) => HELPERS[s.name],
+    };
+  }
+
+  getCardSize() {
+    return 5;
+  }
+
+  _watch() {
+    const c = this._config;
+    return [c.day_entity, c.evening_entity, c.scores_entity];
+  }
+
+  _localKey() {
+    const sig = Object.values(this._items || {}).map((v) => v.map((i) => i.summary + i.description + i.status).join("|")).join("#");
+    return [this._arm, this._rateOpen, JSON.stringify(this._open || {}), JSON.stringify(this._votes || {}), sig, this._error, Math.floor(Date.now() / 60000)].join("#");
+  }
+
+  _slots() {
+    const c = this._config;
+    const h = this._hass;
+    const today = localDate();
+    const out = [];
+    for (const [k, entity, label, icon] of [["day", c.day_entity, "Today", "mdi:white-balance-sunny"], ["evening", c.evening_entity, "Tonight", "mdi:weather-night"]]) {
+      const st = entity ? h.states[entity] : null;
+      const w = parseWear(st?.state);
+      if (!w) continue;
+      if (k === "evening" && c.evening_today_only !== false && localDate(new Date(st.last_changed)) !== today) continue;
+      out.push({ k, entity, label, icon, w, st });
+    }
+    return out;
+  }
+
+  _html() {
+    const c = this._config;
+    const h = this._hass;
+    if (this._error) return `<ha-card><div class="empty">${esc(this._error)}</div></ha-card>`;
+    const accent = this._accent();
+    const today = localDate();
+    const slots = this._slots();
+    const armed = this._arm === "refresh";
+    const regen = c.refresh_entity
+      ? `<button class="btn${armed ? " on" : ""}" style="--c:var(--amber-color,#ffc107)" data-a="refresh" aria-label="New pick"><ha-icon icon="mdi:refresh"></ha-icon>${armed ? "Tap again" : "New pick"}</button>`
+      : "";
+    const newest = slots.map((s) => s.st.last_changed).sort().pop();
+    const updated = c.show_updated !== false && newest ? `Updated ${ago(newest)}` : "";
+    const worn = this._bottles().find((b) => b.lastUsed === today && !b.done);
+
+    const rows = slots.map(({ k, label, icon, w, entity }) => {
+      const b = this._bottle(w.name);
+      const wornToday = b && b.lastUsed === today;
+      const vote = b ? this._myVote(b) : "";
+      const sz = "width:34px;height:34px;min-width:34px;padding:0;--mdc-icon-size:18px";
+      const chips = c.show_details !== false && b
+        ? [...b.accords.slice(0, 3).map((x) => `<span class="tag" style="--c:${accent}">${esc(x)}</span>`),
+            Number.isFinite(b.longevity) ? `<span class="tag" style="--c:var(--secondary-text-color);font-weight:500" title="Parfumo longevity">lasts ${esc(String(b.longevity))}/10</span>` : "",
+            b.stars ? `<span class="tag" style="--c:#f4c542">${"★".repeat(b.stars)}</span>` : "",
+            !b.stars && b.lastUsed === "" ? `<span class="tag" style="--c:var(--green-color,#4caf50)">New to you</span>` : ""].join("")
+        : "";
+      const actions = b
+        ? `<div class="row">
+            ${wornToday ? `<span class="tag" style="--c:var(--green-color,#4caf50)"><ha-icon icon="mdi:check" style="--mdc-icon-size:12px"></ha-icon>Worn today</span>`
+              : `<button class="btn on" style="--c:var(--amber-color,#ffc107)" data-a="wear" data-uid="${esc(b.uid)}"><ha-icon icon="mdi:spray"></ha-icon>Wearing it</button>`}
+            <span class="row" style="margin-left:auto;gap:6px;flex-wrap:nowrap">
+              <button class="btn round small${vote === "up" ? " on" : ""}" style="--c:var(--green-color,#4caf50);${sz}" data-a="vote" data-v="up" data-uid="${esc(b.uid)}" aria-pressed="${vote === "up"}" aria-label="More like ${esc(b.name)}"><ha-icon icon="mdi:thumb-up${vote === "up" ? "" : "-outline"}"></ha-icon></button>
+              <button class="btn round small${vote === "down" ? " on" : ""}" style="--c:var(--red-color,#f44336);${sz}" data-a="vote" data-v="down" data-uid="${esc(b.uid)}" aria-pressed="${vote === "down"}" aria-label="Less ${esc(b.name)}"><ha-icon icon="mdi:thumb-down${vote === "down" ? "" : "-outline"}"></ha-icon></button>
+              <button class="btn round small${this._rateOpen === k ? " on" : ""}" style="--c:var(--amber-color,#ffc107);${sz}" data-a="rate-open" data-k="${k}" aria-expanded="${this._rateOpen === k}" aria-label="Rate ${esc(b.name)}"><ha-icon icon="mdi:star${b.stars ? "" : "-outline"}"></ha-icon></button>
+            </span></div>
+          ${this._rateOpen === k ? `<div class="well row" style="padding:6px 10px;flex-wrap:nowrap"><span style="flex:1;font-size:13px">Rate ${esc(b.name)}</span><span style="white-space:nowrap">${this._starsHtml(b, 24)}</span></div>` : ""}`
+        : `<span class="muted">Not on ${esc(friendly(h, c.list))}</span>`;
+      const open = this._open?.[k];
+      return `<div class="well wearrow">
+        <div class="head">
+          ${this._img(b, "", 240)}
+          <span class="title" data-a="info" data-entity="${esc(entity)}"><span class="slotname"><ha-icon icon="${icon}"></ha-icon>${label}</span>
+            <span class="pick">${esc(w.name)}</span>${b?.brand ? `<span class="brand">${esc(b.brand)}</span>` : ""}</span>
+          ${w.score ? `<span class="score" style="--c:${accent}" title="Score">${esc(w.score)}</span>` : ""}
+        </div>
+        ${chips ? `<div class="chips">${chips}</div>` : ""}
+        ${w.reason ? `<span class="reason${open ? " open" : ""}" data-a="expand" data-k="${k}" role="button" tabindex="0" aria-expanded="${!!open}">${esc(w.reason)}</span>` : ""}
+        ${actions}
+      </div>`;
+    }).join("");
+
+    const pickNames = slots.map((s) => s.w.name.toLowerCase());
+    const scores = c.show_scores !== false && c.scores_entity ? String(h.states[c.scores_entity]?.state || "") : "";
+    const others = scores && !["unknown", "unavailable"].includes(scores)
+      ? scores.split("·").map((x) => x.trim()).filter((x) => x && !pickNames.some((n) => x.toLowerCase().startsWith(n))).slice(0, Number(c.max_scores ?? 4))
+      : [];
+    const runners = others.length
+      ? `<div class="row" style="gap:6px"><span class="muted">Also good:</span>${others.map((o) => {
+          const m = /^(.+?)\s+(\d+)$/.exec(o);
+          const b = this._bottle(m ? m[1] : o);
+          return b ? `<button class="btn small" data-a="wear" data-uid="${esc(b.uid)}" title="Wear ${esc(b.name)} instead">${esc(o)}</button>` : `<span class="tag" style="--c:var(--secondary-text-color)">${esc(o)}</span>`;
+        }).join("")}</div>`
+      : "";
+    const empty = !rows
+      ? `<div class="empty">${this._bottles().filter((b) => !b.done).length ? "No pick yet. Tap New pick." : `Add bottles to ${esc(friendly(h, c.list))} to get picks.`}</div>`
+      : "";
+    const state = worn ? `Wearing ${esc(worn.name)}` : updated || "Today's fragrance";
+    return `<ha-card>
+      ${this._tile({ icon: c.icon, name: c.title, c: accent, state, off: !rows, iconAction: "info", iconData: `data-entity="${esc(c.day_entity || "")}"`, trailing: regen })}
+      <div class="body">${rows}${empty}${runners}</div></ha-card>`;
+  }
+
+  _action(a, el) {
+    const c = this._config;
+    if (this._wearAction(a, el)) return undefined;
+    if (a === "rate-open") { this._rateOpen = this._rateOpen === el.dataset.k ? "" : el.dataset.k; return this._render(true); }
+    if (a === "expand") { (this._open ||= {})[el.dataset.k] = !this._open[el.dataset.k]; return this._render(true); }
+    if (a === "info") return this._moreInfo(el.dataset.entity);
+    if (a === "refresh" && this._armed("refresh")) {
+      this._toast("Picking something to wear…");
+      return this._toggle(c.refresh_entity);
+    }
+    return undefined;
+  }
+
+  _keydown(ev) {
+    if ((ev.key === "Enter" || ev.key === " ") && ev.target.matches?.('[data-a="expand"]')) {
+      ev.preventDefault();
+      return this._action("expand", ev.target);
+    }
+    return super._keydown(ev);
+  }
+}
+
+/* ------------------------------------------------------------------ Perfume collection */
+
+class PerfumeCollectionCard extends WearMixin(FcBase) {
+  static defaults() {
+    return { title: "Collection", icon: "mdi:bottle-tonic-outline", list: "todo.fragrances", feedback_script: "script.fragrance_feedback", lookup_script: "script.fragrance_parfumo_lookup",
+      show_images: true, show_search: true, show_families: true, show_add: true, show_finished: true, sort: "name", tile_width: 104, max_items: 60, gloss: true };
+  }
+
+  static getStubConfig() {
+    return { list: "todo.fragrances" };
+  }
+
+  static getConfigForm() {
+    return {
+      schema: [
+        { type: "grid", name: "", schema: [
+          { name: "title", selector: { text: {} } },
+          { name: "icon", selector: { icon: {} } },
+        ] },
+        { name: "list", selector: { entity: { domain: ["todo"] } } },
+        { type: "grid", name: "", schema: [
+          { name: "feedback_script", selector: { entity: { domain: ["script"] } } },
+          { name: "lookup_script", selector: { entity: { domain: ["script"] } } },
+        ] },
+        { type: "expandable", name: "", title: "Show", flatten: true, schema: [
+          { type: "grid", name: "", schema: [
+            { name: "show_images", selector: { boolean: {} } },
+            { name: "show_search", selector: { boolean: {} } },
+            { name: "show_families", selector: { boolean: {} } },
+            { name: "show_add", selector: { boolean: {} } },
+            { name: "show_finished", selector: { boolean: {} } },
+            { name: "gloss", selector: { boolean: {} } },
+            { name: "color", selector: { ui_color: {} } },
+            { name: "sort", selector: { select: { mode: "dropdown", options: [
+              { value: "name", label: "Name" }, { value: "stars", label: "Best rated first" }, { value: "worn", label: "Longest since worn" }, { value: "family", label: "Main accord, then name" },
+            ] } } },
+            { name: "tile_width", selector: { number: { min: 72, max: 200, unit_of_measurement: "px", mode: "box" } } },
+            { name: "max_items", selector: { number: { min: 6, max: 500, mode: "box" } } },
+          ] },
+        ] },
+      ],
+      computeLabel: (s) => LABELS[s.name] || titleCase(s.name),
+      computeHelper: (s) => HELPERS[s.name],
+    };
+  }
+
+  getCardSize() {
+    return 8;
+  }
+
+  _localKey() {
+    const sig = Object.values(this._items || {}).map((v) => v.map((i) => i.summary + i.description + i.status).join("|")).join("#");
+    return [this._tab, this._q, this._fam, this._openUid, this._adding, this._arm, sig, this._error].join("#");
+  }
+
+  _html() {
+    const c = this._config;
+    const h = this._hass;
+    if (this._error) return `<ha-card><div class="empty">${esc(this._error)}</div></ha-card>`;
+    if (!c.list) return `<ha-card><div class="empty">Pick a todo list in the card settings.</div></ha-card>`;
+    const accent = this._accent();
+    const all = this._bottles();
+    const shelf = all.filter((b) => !b.done);
+    const finished = all.filter((b) => b.done);
+    const tab = c.show_finished !== false && this._tab === "finished" ? "finished" : "shelf";
+    const pool = tab === "finished" ? finished : shelf;
+    const fams = {};
+    for (const b of pool) fams[b.family] = (fams[b.family] || 0) + 1;
+    const q = (this._q || "").toLowerCase();
+    const items = pool.filter((b) => (!this._fam || b.family === this._fam) && (!q || `${b.name} ${b.brand} ${b.f.Notes || ""} ${b.accords.join(" ")}`.toLowerCase().includes(q)));
+    const sorts = {
+      name: (a, b) => a.name.localeCompare(b.name),
+      stars: (a, b) => b.stars - a.stars || a.name.localeCompare(b.name),
+      worn: (a, b) => (a.lastUsed || "0").localeCompare(b.lastUsed || "0") || a.name.localeCompare(b.name),
+      family: (a, b) => a.family.localeCompare(b.family) || a.name.localeCompare(b.name),
+    };
+    items.sort(sorts[c.sort] || sorts.name);
+    const shown = items.slice(0, Number(c.max_items) || 60);
+    const today = localDate();
+    const lookingUp = shelf.filter((b) => b.pending).length;
+
+    const addBtn = c.show_add !== false && !this._adding ? `<button class="btn on" style="--c:${accent}" data-a="add">+ Add</button>` : "";
+    const add = this._adding
+      ? `<div class="well row" style="padding:8px">
+          <input type="text" class="well" style="flex:2 1 170px" placeholder="Brand and name, e.g. Demeter Dirt" data-live="add-name" data-enter="add-save" aria-label="Bottle name">
+          <input type="text" class="well" style="flex:1 1 80px" placeholder="Size" data-live="add-size" data-enter="add-save" aria-label="Size">
+          <button class="btn on" style="--c:${accent}" data-a="add-save">Add</button><button class="btn" data-a="add-cancel">Cancel</button></div>
+        <span class="muted" style="padding:0 2px">Home Assistant looks new bottles up on Parfumo for the picture, notes and votes.</span>`
+      : "";
+    const tabs = c.show_finished !== false && finished.length
+      ? `<div class="tabs well" role="tablist" style="--n:2">${[["shelf", `On the shelf · ${shelf.length}`], ["finished", `Finished · ${finished.length}`]].map(([k, label]) =>
+          `<button class="tab${k === tab ? " btn" : ""}" role="tab" aria-selected="${k === tab}" data-a="tab" data-tab="${k}">${esc(label)}</button>`).join("")}</div>`
+      : "";
+    const search = c.show_search !== false && pool.length > 4
+      ? `<label class="well search"><ha-icon icon="mdi:magnify" style="--mdc-icon-size:18px;color:var(--secondary-text-color)"></ha-icon><input type="search" placeholder="Search bottles, brands, notes or accords" value="${esc(this._q || "")}" data-live="search" aria-label="Search"></label>`
+      : "";
+    const chips = c.show_families !== false && Object.keys(fams).length > 1
+      ? `<div class="row">${[["", "All", pool.length], ...Object.entries(fams).sort((a, b) => b[1] - a[1]).map(([k, v]) => [k, k, v])]
+          .map(([k, label, n]) => `<button class="btn small${(this._fam || "") === k ? " on" : ""}" style="--c:${accent}" aria-pressed="${(this._fam || "") === k}" data-a="fam" data-fam="${esc(k)}">${esc(label)} ${n}</button>`).join("")}</div>`
+      : "";
+    const open = this._openUid ? all.find((b) => b.uid === this._openUid) : null;
+    const tiles = shown.map((b) => {
+      const sub = b.pending ? `<span class="wait">Looking up…</span>`
+        : b.notFound ? `<span class="wait" style="color:var(--error-color,#db4437)">Not on Parfumo</span>`
+        : `<span class="s">${esc([b.stars ? "★".repeat(b.stars) : "", b.lastUsed ? wornAgo(b.lastUsed) : b.brand].filter(Boolean).join(" · ") || b.family)}</span>`;
+      return `<button class="btl well${open?.uid === b.uid ? " sel" : ""}${b.done ? " done" : ""}" style="--c:${accent}" data-a="open" data-uid="${esc(b.uid)}" aria-expanded="${open?.uid === b.uid}" aria-label="${esc(b.name)}">
+        ${this._img(b, "", 240)}<span class="n">${esc(b.name)}</span>${sub}</button>`;
+    }).join("");
+    const more = items.length > shown.length ? `<div class="empty">${items.length - shown.length} more; search or pick an accord to narrow it down.</div>` : "";
+    const empty = !pool.length
+      ? `<div class="empty">${tab === "finished" ? "Nothing finished yet." : "No bottles yet. Tap + Add, or add them to the list in the to-do panel."}</div>`
+      : !items.length ? `<div class="empty">Nothing matches.</div>` : "";
+    const state = `${shelf.length} bottle${shelf.length === 1 ? "" : "s"}${lookingUp ? ` · looking up ${lookingUp}` : ""}`;
+    return `<ha-card>
+      ${this._tile({ icon: c.icon, name: c.title, c: accent, state, iconAction: "list-info", trailing: addBtn })}
+      <div class="body">${add}${tabs}${open ? this._detail(open) : ""}${search}${chips}
+        ${tiles ? `<div class="shelf" style="--w:${Number(c.tile_width) || 104}px">${tiles}</div>` : ""}${more}${empty}</div></ha-card>`;
+  }
+
+  _detail(b) {
+    const c = this._config;
+    const accent = this._accent();
+    const today = localDate();
+    const facts = [b.brand, b.f.Size, wornAgo(b.lastUsed),
+      b.liked || b.disliked ? `👍 ${b.liked} · 👎 ${b.disliked}` : ""].filter(Boolean).join(" · ");
+    const meters = [this._meter("Parfumo", b.score, 10, accent), this._meter("Longevity", b.longevity, 10, "var(--teal-color,#009688)"), this._meter("Sillage", b.sillage, 10, "var(--blue-color,#2196f3)")].join("");
+    const seasonC = { spring: "var(--light-green-color,#8bc34a)", summer: "var(--amber-color,#ffc107)", fall: "var(--deep-orange-color,#ff6f22)", autumn: "var(--deep-orange-color,#ff6f22)", winter: "var(--light-blue-color,#03a9f4)" };
+    const seasons = b.season.length
+      ? `<span class="sub">Seasons · Parfumo votes</span><div class="meters">${b.season.map(([k, v]) => this._meter(k, v, Math.max(...b.season.map((x) => x[1])), seasonC[k.toLowerCase()] || accent, "%")).join("")}</div>`
+      : "";
+    const occasion = b.occasion.length ? `<span class="sub">Occasions</span><div class="chips">${b.occasion.slice(0, 4).map(([k, v]) => `<span class="tag" style="--c:${accent}">${esc(k)} ${v}%</span>`).join("")}</div>` : "";
+    const mine = [b.f.Season ? `<span class="tag" style="--c:var(--green-color,#4caf50)">Your seasons: ${esc(b.f.Season)}</span>` : "", b.f.Suggestions || b.f.Suggestion ? `<span class="tag" style="--c:var(--amber-color,#ffc107)">Note: ${esc(b.f.Suggestions || b.f.Suggestion)}</span>` : ""].join("");
+    const fixUrl = b.notFound
+      ? `<div class="well row" style="padding:8px"><span class="muted" style="flex:1 1 100%">Parfumo didn't find this one. Paste its Parfumo page link:</span>
+          <input type="text" class="well" style="flex:1 1 200px" placeholder="https://www.parfumo.com/Perfumes/…" data-live="url" data-enter="url-save" data-uid="${esc(b.uid)}" aria-label="Parfumo link">
+          <button class="btn on" style="--c:${accent}" data-a="url-save" data-uid="${esc(b.uid)}">Look up</button></div>`
+      : "";
+    const finishArmed = this._arm === `finish:${b.uid}`;
+    const buttons = [
+      b.done ? "" : b.lastUsed === today ? `<span class="tag" style="--c:var(--green-color,#4caf50)">Worn today</span>`
+        : `<button class="btn on" style="--c:var(--amber-color,#ffc107)" data-a="wear" data-uid="${esc(b.uid)}"><ha-icon icon="mdi:spray"></ha-icon>Wearing it</button>`,
+      b.url ? `<a class="btn" href="${esc(b.url)}" target="_blank" rel="noopener noreferrer"><ha-icon icon="mdi:open-in-new"></ha-icon>Parfumo</a>` : "",
+      c.lookup_script && !b.pending ? `<button class="btn" data-a="lookup" data-uid="${esc(b.uid)}"><ha-icon icon="mdi:database-refresh"></ha-icon>Refresh</button>` : "",
+      b.done ? `<button class="btn" data-a="restock" data-uid="${esc(b.uid)}"><ha-icon icon="mdi:package-variant"></ha-icon>Back on the shelf</button>`
+        : `<button class="btn${finishArmed ? " on" : ""}" style="--c:var(--error-color,#db4437);${finishArmed ? "" : "color:var(--error-color,#db4437)"}" data-a="finish" data-uid="${esc(b.uid)}">${finishArmed ? "Tap again" : "Finished it"}</button>`,
+    ].filter(Boolean).join("");
+    return `<div class="well detail">
+      <div class="top">${this._img(b, "lg", 360)}
+        <span class="t"><span class="n">${esc(b.name)}</span><span class="muted">${esc(facts)}</span>
+          <span style="white-space:nowrap">${this._starsHtml(b, 22)}</span>
+          ${b.accords.length ? `<div class="chips">${b.accords.map((x) => `<span class="tag" style="--c:${accent}">${esc(x)}</span>`).join("")}</div>` : ""}</span>
+        <button class="btn round small" style="width:32px;height:32px;min-width:32px;padding:0" data-a="close" aria-label="Close"><ha-icon icon="mdi:close"></ha-icon></button></div>
+      ${b.pending ? `<span class="muted">Looking it up on Parfumo…</span>` : ""}
+      ${fixUrl}
+      ${b.f.Notes && b.f.Notes !== "unknown" ? `<span class="state wrap" style="color:var(--primary-text-color)">${esc(b.f.Notes)}</span>` : ""}
+      ${mine ? `<div class="chips">${mine}</div>` : ""}
+      ${meters ? `<div class="meters">${meters}</div>` : ""}
+      ${seasons}${occasion}
+      <div class="row">${buttons}</div>
+    </div>`;
+  }
+
+  _live(kind, el) {
+    if (kind === "search") {
+      this._q = el.value;
+      const pos = el.selectionStart;
+      this._render(true);
+      const input = this.shadowRoot.querySelector('input[data-live="search"]');
+      if (input) {
+        input.focus();
+        try { input.setSelectionRange(pos, pos); } catch (e) { /* not supported */ }
+      }
+    } else if (kind.startsWith("add-")) {
+      (this._draft ||= {})[kind.slice(4)] = el.value;
+    } else if (kind === "url") {
+      this._url = el.value;
+    }
+  }
+
+  _action(a, el) {
+    const c = this._config;
+    if (this._wearAction(a, el)) return undefined;
+    if (a === "tab") { this._tab = el.dataset.tab; this._fam = ""; this._openUid = ""; return this._render(true); }
+    if (a === "fam") { this._fam = el.dataset.fam; return this._render(true); }
+    if (a === "open") { this._openUid = this._openUid === el.dataset.uid ? "" : el.dataset.uid; this._url = ""; return this._render(true); }
+    if (a === "close") { this._openUid = ""; return this._render(true); }
+    if (a === "list-info") return this._moreInfo(c.list);
+    if (a === "add") { this._adding = true; this._draft = {}; this._render(true); return this.shadowRoot.querySelector('[data-live="add-name"]')?.focus(); }
+    if (a === "add-cancel") { this._adding = false; return this._render(true); }
+    if (a === "add-save") {
+      const d = this._draft || {};
+      const name = String(d.name || "").trim();
+      if (!name) return this._toast("Enter a bottle name first.");
+      if (this._bottle(name)) return this._toast(`${name} is already on the list.`);
+      this._adding = false;
+      this._render(true);
+      this._toast(`Added ${name}; looking it up on Parfumo…`);
+      const data = { item: name };
+      if (String(d.size || "").trim()) data.description = `Size: ${String(d.size).trim()}`;
+      return this._hass.callService("todo", "add_item", data, { entity_id: c.list }).catch((err) => this._toast(err?.message || String(err)));
+    }
+    const b = el.dataset.uid ? this._bottles().find((x) => x.uid === el.dataset.uid) : null;
+    if (!b) return undefined;
+    if (a === "lookup") { this._toast(`Refreshing ${b.name} from Parfumo…`); return this._call("script", "turn_on", { entity_id: c.lookup_script, variables: { scent: b.name } }); }
+    if (a === "url-save") {
+      const url = String(this._url || "").trim();
+      if (!/^https?:\/\/(www\.)?parfumo\.[a-z.]+\/Perfumes\//i.test(url)) return this._toast("Paste a parfumo.com/Perfumes/… link.");
+      this._url = "";
+      this._toast(`Looking up ${b.name}…`);
+      return this._setLines(b, { Parfumo: url.replace(/^https?:\/\/(www\.)?parfumo\.[a-z.]+/i, "https://www.parfumo.com") })
+        .then(() => c.lookup_script && this._call("script", "turn_on", { entity_id: c.lookup_script, variables: { scent: b.name } }));
+    }
+    if (a === "finish") {
+      if (!this._armed(`finish:${b.uid}`)) return undefined;
+      this._toast(`${b.name} moved to Finished.`);
+      this._openUid = "";
+      return this._setLines(b, {}, "completed");
+    }
+    if (a === "restock") { this._toast(`${b.name} is back on the shelf.`); return this._setLines(b, {}, "needs_action"); }
+    return undefined;
+  }
+}
+
 /* ------------------------------------------------------------------ editor labels */
 
 const LABELS = {
@@ -1539,6 +2106,8 @@ const LABELS = {
   show_totals: "Totals", show_families: "Families", show_low: "Running low", max_low: "Running low rows", show_search: "Search",
   show_add: "Add button", sort: "Sort", max_items: "Rows shown",
   summary_entity: "Whole-home summary", rooms: "Rooms", show_updated: "Updated time", show_reason: "Why", show_start: "Start buttons",
+  list: "Perfume list", day_entity: "Day pick", evening_entity: "Evening pick", lookup_script: "Parfumo lookup script", show_images: "Bottle pictures",
+  show_details: "Accords and longevity", evening_today_only: "Hide an old evening pick", show_finished: "Finished tab", tile_width: "Tile width",
   max_scores: "Runner-ups shown", tuning: "Settings behind the gear", feedback_script: "Feedback script", pura_list: "Pura list", scentsy_list: "Scentsy list", room_name: "Room name", critical_threshold: "Red below", show_header: "Header",
 };
 
@@ -1554,6 +2123,9 @@ const HELPERS = {
   rooms: "Each room: its suggestion, Pura diffuser and Scentsy picker.",
   tuning: "Sliders, switches or pickers that tune the suggestions; the gear in the header shows them.",
   room_name: "Sent with thumbs votes. Default: taken from the suggestion entity (…_main_room → Main Room).",
+  list: "A todo list with one item per bottle and Key: value lines (Image, Accords, Longevity, Stars, Last used…).",
+  lookup_script: "Run with scent: <name> to refresh a bottle from Parfumo.",
+  evening_today_only: "Only show the evening pick on the day it was made.",
   feedback_script: "Shows thumbs up/down on each pick and runs this script with scent, target_list, vote (up/down) and room.",
 };
 
@@ -1566,6 +2138,8 @@ const CARDS = [
   ["fragrance-loaded-card", FragranceLoadedCard, "Fragrance Loaded", "What's loaded in each room: Pura pods with levels, and the Scentsy bar."],
   ["fragrance-stash-card", FragranceStashCard, "Fragrance Stash", "What's on the shelf from your todo lists: totals, families, running low."],
   ["fragrance-inventory-card", FragranceInventoryCard, "Fragrance Inventory", "Manage pods and bars in your todo lists: counts, ratings, used up, add."],
+  ["wear-pick-card", WearPickCard, "What to Wear", "Today's and tonight's perfume pick with the bottle's picture, Wearing it, thumbs and stars."],
+  ["perfume-collection-card", PerfumeCollectionCard, "Perfume Collection", "Your perfume bottles as a shelf with Parfumo pictures, notes, votes, ratings and add."],
 ];
 
 window.customCards = window.customCards || [];

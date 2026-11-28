@@ -12,6 +12,8 @@ They're built like the built-in tile card and draw their surfaces from your them
 | `custom:fragrance-loaded-card` | What's loaded in each room: Pura pods with pictures and levels, and the Scentsy bar. |
 | `custom:fragrance-stash-card` | What's on the shelf: totals, a by-family breakdown and what's running low. Read-only. |
 | `custom:fragrance-inventory-card` | Manage the lists: search, filter by family, change counts, rate, mark one used up, add new scents. |
+| `custom:wear-pick-card` | What perfume to wear today and tonight, with the bottle's picture, Wearing it, thumbs and stars. |
+| `custom:perfume-collection-card` | Your perfume bottles as a shelf of pictures: Parfumo notes, accords, longevity and season votes, ratings, add and finish bottles. |
 
 ## Install
 
@@ -211,3 +213,73 @@ rooms:
     warmers: [switch.kitchen_scentsy]
     navigation_path: /lovelace/main
 ```
+
+## Perfumes you wear
+
+Two cards for a personal perfume collection kept in one todo list, one item per bottle. They read the same `Key: value` lines as the stash cards, plus a few from Parfumo:
+
+```text
+Brand: Demeter Fragrance Library
+Parfumo: https://www.parfumo.com/Perfumes/Demeter_Fragrance_Library/Dirt
+Image: https://media.parfumo.com/perfumes/…/dirt_1200.jpg
+Accords: Earthy, Woody, Green
+Notes: Green notes, Moss, Woods
+Parfumo score: 6.5/10
+Longevity: 4.6/10
+Sillage: 4.2/10
+Season votes: Fall 35%, Spring 30%, Summer 20%, Winter 15%
+Occasion votes: Daily 40%, Leisure 30%, Business 10%
+Size: 4 oz
+Season: fall, winter          # your own tags
+Suggestions: not for the office   # your own rule
+Stars: 4/5
+Last used: 2026-11-20
+Liked: 2
+```
+
+`Image` is shown as the bottle's picture, loaded straight from Parfumo's image server; without it the cards draw a bottle. An item with no `Parfumo` line shows **Looking up…**, and `Parfumo: not found` shows a box to paste the right Parfumo link.
+
+### What to Wear
+
+The day and evening picks from text like `Demeter Dirt (64) — earthy moss for a cool day 🌿`. Each shows the bottle, its main accords and longevity, the reason (tap to expand), **Wearing it**, 👍 / 👎 and a star rating. Runner-ups from the scores entity are listed under **Also good**; tapping one marks it worn instead. **New pick** presses the refresh button after a second tap.
+
+```yaml
+type: custom:wear-pick-card
+title: What to wear
+list: todo.fragrances
+day_entity: input_text.wear_suggestion_day
+evening_entity: input_text.wear_suggestion_evening
+scores_entity: input_text.wear_scores            # "Name 64 · Name 50 · ..."
+refresh_entity: input_button.refresh_wear_suggestion
+feedback_script: script.fragrance_feedback       # runs with vote (wear, up, down) and scent
+show_images: true
+show_details: true          # accords, longevity, stars
+show_scores: true
+max_scores: 4
+evening_today_only: true    # hide yesterday's evening pick
+color: deep-purple
+```
+
+Without `feedback_script`, **Wearing it** writes `Last used` on the item itself and the thumbs are hidden.
+
+### Perfume Collection
+
+A shelf of bottle pictures with search and a chip per main accord. Tap a bottle for its notes, accords, Parfumo score, longevity and sillage, the season votes as bars and the top occasions, plus **Wearing it**, a link to Parfumo, **Refresh** (runs the lookup script again) and **Finished it** (two taps; checks it off). Finished bottles move to their own tab, where **Back on the shelf** restores them. **+ Add** adds a bottle by name with an optional size; your lookup automation fills in the rest.
+
+```yaml
+type: custom:perfume-collection-card
+title: Collection
+list: todo.fragrances
+feedback_script: script.fragrance_feedback
+lookup_script: script.fragrance_parfumo_lookup   # called with scent: <name>
+show_images: true
+show_search: true
+show_families: true     # chips by main accord
+show_add: true
+show_finished: true
+sort: name              # name | stars | worn | family
+tile_width: 104         # px; tiles fill the row
+max_items: 60
+color: deep-purple
+```
+
